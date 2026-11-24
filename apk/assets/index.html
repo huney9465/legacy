@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Legacy Music</title>
+<meta name="theme-color" content="#07080b" id="tc">
+<meta name="robots" content="noindex, noarchive">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+<meta name="mobile-web-app-capable" content="yes">
+<script>try{var t=localStorage.getItem('lm-theme')||'auto';document.documentElement.dataset.theme=t==='auto'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t}catch(e){}</script>
+<script>window.LM_BASE=(window.LMNative&&LMNative.base&&LMNative.base())||'';</script>
+<link rel="stylesheet" href="/static/pwa/app.css?v=22.3">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#home"><img src="/static/pwa/icon-192.png" alt="" width="30" height="30"><b>Legacy Music</b></a>
+  <button class="ib" id="bell" data-a="notifs" aria-label="Announcements"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 01-3.4 0"/></svg><i class="ndot" hidden></i></button>
+  <button class="ib" data-go="search" aria-label="Search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg></button>
+  <button class="av" id="top-av" data-go="you" aria-label="Your account"></button>
+</header>
+
+<main id="view" aria-live="polite"></main>
+
+<div id="mini" hidden>
+  <i class="bar"><i id="mini-bar"></i></i>
+  <img id="mini-art" alt="">
+  <div class="mt" data-a="open-np"><b id="mini-t"></b><small id="mini-s"></small></div>
+  <button class="ib" data-a="like" id="mini-like" aria-label="Add to liked"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+  <button class="ib" data-a="toggle" aria-label="Play or pause"><svg viewBox="0 0 24 24" id="mini-pp"></svg></button>
+</div>
+
+<nav class="tabs">
+  <a href="#home" data-tab="home"><svg viewBox="0 0 24 24"><path d="M4 11l8-7 8 7v9h-5v-6H9v6H4z"/></svg>Home</a>
+  <a href="#search" data-tab="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>Search</a>
+  <a href="#library" data-tab="library"><svg viewBox="0 0 24 24"><path d="M4 5h2v14H4zM9 5h2v14H9zM14.5 6l2-.6 3.4 13-2 .6z"/></svg>Library</a>
+  <a href="#you" data-tab="you"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6z"/></svg>You</a>
+</nav>
+
+<section id="np" hidden>
+  <div id="np-bg"></div>
+  <div class="np-top"><button class="ib" data-a="close-np" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button><span id="np-mode"></span><button class="ib" data-a="np-menu" aria-label="More"><svg viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></svg></button></div>
+  <img id="np-art" alt="" decoding="async">
+  <div id="np-lyr" class="np-lyr"></div>
+  <div class="np-meta-row">
+    <div class="np-meta"><b id="np-t"></b><small id="np-s"></small></div>
+    <button class="ib" data-a="np-x" aria-label="Not interested"><svg viewBox="0 0 24 24"><path d="M5 5l14 14M19 5L5 19"/></svg></button>
+    <button class="ib np-add-btn" data-a="like" id="np-like" aria-label="Add to liked"><svg viewBox="0 0 24 24" id="np-add-icon"><path d="M12 5v14M5 12h14"/></svg></button>
+  </div>
+  <input id="np-seek" type="range" min="0" max="1000" value="0" aria-label="Seek">
+  <div class="np-time"><span id="np-cur">0:00</span><span id="np-dur">0:00</span></div>
+  <div class="np-ctl">
+    <button class="ib" data-a="shuffle" id="np-shuf" aria-label="Shuffle"><svg viewBox="0 0 24 24"><path d="M3 7h4c4 0 6 10 10 10h4M3 17h4c1.5 0 2.7-1 3.7-2.5M14 8.5C15 7.5 16 7 17 7h4M18 4l3 3-3 3M18 14l3 3-3 3"/></svg></button>
+    <button class="ib" data-a="prev" aria-label="Previous"><svg viewBox="0 0 24 24"><path d="M18 5l-9 7 9 7zM5 5h2v14H5z"/></svg></button>
+    <button class="pp" data-a="toggle" aria-label="Play or pause"><svg viewBox="0 0 24 24" id="np-pp"></svg></button>
+    <button class="ib" data-a="next" aria-label="Next"><svg viewBox="0 0 24 24"><path d="M6 5l9 7-9 7zM17 5h2v14h-2z"/></svg></button>
+    <button class="ib" data-a="sleep" id="np-sleep" aria-label="Sleep timer"><svg viewBox="0 0 24 24"><circle cx="12" cy="13.5" r="7.5"/><path d="M12 9.5v4l2.5 1.5M10 2.5h4"/></svg></button>
+  </div>
+  <div class="np-ex">
+    <button class="ib dlc" data-a="dl" id="np-dl" aria-label="Download"><svg viewBox="0 0 24 24"><path d="M12 7v8M8.5 12l3.5 3.5 3.5-3.5M8 18h8"/></svg></button>
+    <button class="ib" data-a="repeat" id="np-rep" aria-label="Repeat"><svg viewBox="0 0 24 24"><path d="M4 12V9a3 3 0 013-3h12M16 3l3 3-3 3M20 12v3a3 3 0 01-3 3H5M8 21l-3-3 3-3"/></svg><em id="np-rep1">1</em></button>
+    <button class="ib" data-a="autoplay" id="np-auto" aria-label="Autoplay"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 109 9M12 7v5l3 2M17 2l4 1-1 4"/></svg></button>
+    <span class="sp"></span>
+    <button class="ib" data-a="share" aria-label="Share"><svg viewBox="0 0 24 24"><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="M8.2 10.8l7.6-4.4M8.2 13.2l7.6 4.4"/></svg></button>
+    <button class="ib" data-a="queue" aria-label="Queue"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h9"/></svg></button>
+  </div>
+  <div id="np-queue" hidden></div>
+  <div id="np-lcard" class="np-card" hidden><b class="ct">Lyrics preview</b><div id="np-lines"></div><button class="pillbtn" data-a="lyrics-full">Show lyrics</button></div>
+  <div id="np-acard" class="np-card ac" hidden></div>
+</section>
+
+<div id="sheet" hidden><div class="sh-bg" data-a="close-sheet"></div><div class="sh-box" id="sheet-box"></div></div>
+<div id="upd" hidden></div>
+<div id="toast" role="status"></div>
+<audio id="au" preload="auto"></audio>
+<script src="/static/pwa/app.js?v=22.3" defer></script>
+</body>
+</html>
