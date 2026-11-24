@@ -314,3 +314,36 @@ body,#mini,.tabs,#np,.box,.row,.chip,.search{transition:none!important}
 #np:not([hidden]){animation:slideup .22s ease-out}
 .sh-box{animation:slideup .2s ease-out}.sh-bg{animation:none}
 .lg-orb{filter:none;opacity:.25;animation:none}
+
+/* ───────── v22.6: full-screen lyrics (own background that follows the song), nobody can copy, playlist photo editor ───────── */
+#lyv{position:fixed;inset:0;max-width:560px;margin:0 auto;z-index:70;color:#fff;display:flex;flex-direction:column;overflow:hidden;
+  padding:calc(var(--sat) + 6px) 0 calc(var(--sab) + 14px);background:linear-gradient(var(--np-tint,#3a3550),#0b0b0f 90%) #0b0b0f}
+#lyv[hidden]{display:none}
+#lyv-bg{position:absolute;inset:-30px;z-index:0;background:center/cover;filter:blur(36px) saturate(1.7);opacity:.6;transform:scale(1.15)}
+#lyv::after{content:"";position:absolute;inset:0;z-index:0;pointer-events:none;background:linear-gradient(rgba(0,0,0,.12),rgba(0,0,0,.6))}
+#lyv>:not(#lyv-bg){position:relative;z-index:1}
+.lyv-top{display:flex;align-items:center;gap:6px;padding:0 10px;height:48px;flex:none}
+.lyv-top .ib{width:40px;height:40px;color:#fff}.lyv-top .ib svg{width:26px;height:26px}
+.lyv-sp{width:40px;flex:none}
+.lyv-tt{flex:1;min-width:0;text-align:center}
+.lyv-tt b{display:block;font:700 14px/1.25 Inter,system-ui,sans-serif;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.lyv-tt small{display:block;font-size:12px;opacity:.75;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+#lyv-box{flex:1;min-height:0;overflow-y:auto;padding:26vh 22px;overscroll-behavior:contain;-webkit-mask-image:linear-gradient(transparent,#000 12%,#000 88%,transparent);mask-image:linear-gradient(transparent,#000 12%,#000 88%,transparent)}
+#lyv-lines p{margin:0 0 22px;font:800 27px/1.32 Inter,system-ui,"Noto Sans Gurmukhi","Noto Sans Devanagari",sans-serif;color:rgba(255,255,255,.34);transition:color .25s}
+#lyv-lines p.past{color:rgba(255,255,255,.5)}
+#lyv-lines p.cur{color:#fff}
+#lyv-lines p.pl{font-size:21px;font-weight:700;color:rgba(255,255,255,.92);margin-bottom:14px}
+.lyv-msg{text-align:center;opacity:.85;font:600 15px Inter,system-ui,sans-serif;margin-top:14vh}
+.lyv-ctl{flex:none;padding:8px 24px 0}
+.lyv-bar{display:block;height:3px;border-radius:2px;background:rgba(255,255,255,.28);overflow:hidden}
+#lyv-prog{display:block;height:100%;width:0;background:#fff}
+.lyv-ctl>div{display:flex;justify-content:center;align-items:center;gap:30px;margin-top:10px}
+.lyv-ctl .ib{width:44px;height:44px;color:#fff}.lyv-ctl .ib svg{width:26px;height:26px;fill:currentColor;stroke:none}
+.lyv-ctl .pp{width:54px;height:54px}.lyv-ctl .pp svg{width:26px;height:26px;fill:currentColor}
+/* lyrics can't be selected, long-pressed, dragged or copied */
+#lyv,#lyv *,#np-lcard,#np-lcard *,#np-lyr,.lyfull,.lyfull *{-webkit-user-select:none!important;user-select:none!important;-webkit-touch-callout:none!important;-webkit-tap-highlight-color:transparent}
+#np-lcard,#np-lyr{cursor:pointer}
+/* playlist: cover photo + background pickers */
+.plart{display:grid;gap:12px;margin:6px 0 4px}
+.plart-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.plart-row>span{flex:1 1 100%;font-weight:700;font-size:13px;color:var(--mu)}
