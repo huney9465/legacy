@@ -1,5 +1,5 @@
 :root{--bg:#07080b;--s1:#12151c;--s2:#1a1f2b;--tx:#eef2f9;--mu:#8b95a7;--br:#3b9dff;--br2:#7c5cff;--ok:#34d399;--bad:#f87171;--ln:#232733;--ln2:#171a22;--bar:#0b0d12;--mini-bg:#161b26;--pp-bg:#eef2f9;--pp-fg:#000;--chip-on:#eef2f9;--chip-onfg:#000;--np-top:#1a2540;--shadow:rgba(0,0,0,.55);
-  --sat:env(safe-area-inset-top,0px);--sab:env(safe-area-inset-bottom,0px);--tabs:54px;--mini:56px}
+  --sat:env(safe-area-inset-top,0px);--sab:env(safe-area-inset-bottom,0px);--tabs:54px;--mini:64px}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.4 Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
 body{max-width:560px;margin:0 auto;min-height:100vh;position:relative;overscroll-behavior-y:contain}
@@ -226,7 +226,7 @@ h2 small[data-go],h2 small[data-a]{cursor:pointer;color:var(--br)}
 
 
 /* ═════════ v24: compact Spotify-style look + lighter / faster ═════════ */
-:root{--tabs:54px;--mini:56px;--sp:#1ed760}
+:root{--tabs:54px;--mini:64px;--sp:#1ed760}
 html,body{font-size:14px}
 h1{font-size:21px;margin:6px 0 2px}h2{font-size:16px;margin:18px 0 8px}h2 small{font-size:12px}
 .sub{font-size:12px}
@@ -249,14 +249,23 @@ h1{font-size:21px;margin:6px 0 2px}h2{font-size:16px;margin:18px 0 8px}h2 small{
 .tabs{background:linear-gradient(transparent,rgba(0,0,0,.92) 35%)!important;border-top:0!important}
 html[data-theme=light] .tabs{background:linear-gradient(rgba(255,255,255,0),#fff 35%)!important}
 
-/* mini player: floating, cover-tinted, tiny controls */
-#mini{left:8px;right:8px;max-width:544px;bottom:calc(var(--tabs) + var(--sab) + 4px);height:52px;gap:9px;padding:0 4px 0 7px;border:0;border-radius:8px;
-  background:color-mix(in srgb,var(--np-tint,#3a3550) 72%,#000)}
-#mini img{width:38px;height:38px;border-radius:4px}
-#mini .mt b{font-size:13px;color:#fff}#mini .mt small{font-size:11.5px;color:rgba(255,255,255,.7)}
-#mini .ib{width:34px;height:34px;color:#fff}#mini .ib svg{width:22px;height:22px}
-#mini #mini-like svg{width:24px;height:24px;fill:none;stroke:#fff;stroke-width:1.8;stroke-linecap:round}
-#mini .bar{left:8px;right:8px;top:auto;bottom:0;height:2px;background:rgba(255,255,255,.25);border-radius:2px}
+/* mini player: floating, cover-tinted, Spotify-style with prev / play / next */
+#mini{left:8px;right:8px;max-width:544px;bottom:calc(var(--tabs) + var(--sab) + 6px);height:60px;gap:10px;padding:0 6px 0 8px;border:0;border-radius:10px;
+  background:color-mix(in srgb,var(--np-tint,#3a3550) 78%,#000);box-shadow:0 8px 22px rgba(0,0,0,.42)}
+#mini img{width:46px;height:46px;border-radius:6px;box-shadow:0 2px 8px rgba(0,0,0,.35)}
+#mini .mt b{font-size:13.5px;color:#fff}#mini .mt small{font-size:11.5px;color:rgba(255,255,255,.72)}
+#mini .mctl{display:flex;align-items:center;gap:0;flex:none}
+#mini .mctl .ib{width:36px;height:36px;color:#fff}
+#mini .mctl .ib svg{width:24px;height:24px;fill:currentColor;stroke:none}
+/* v23.5: the like (heart) is back in the MAIN top player, not only in the silent notification.
+   It sits between the song text and the prev/play/next controls: outline = not liked, solid red = liked. */
+#mini #mini-like{flex:none;width:34px;height:34px;color:#fff;opacity:.9}
+#mini #mini-like svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linejoin:round}
+#mini #mini-like.on{color:#ff4d6d;opacity:1}
+#mini #mini-like.on svg{fill:currentColor;stroke:none}
+#mini #mini-like.pop{animation:mlike .34s ease}
+@keyframes mlike{0%{transform:scale(1)}45%{transform:scale(1.28)}100%{transform:scale(1)}}
+#mini .bar{left:10px;right:10px;top:auto;bottom:0;height:2px;background:rgba(255,255,255,.22);border-radius:2px}
 #mini .bar i{background:#fff}
 #toast{bottom:calc(var(--tabs) + var(--mini) + var(--sab) + 16px)}
 
@@ -378,7 +387,7 @@ html.bgd *,html.bgd *::before,html.bgd *::after{animation-play-state:paused!impo
 .np-seg{display:flex;background:rgba(255,255,255,.12);border-radius:20px;padding:3px}
 .np-seg button{border:0;background:none;color:#fff;font:700 13px Inter,sans-serif;padding:6px 20px;border-radius:17px;opacity:.75}
 .np-seg button.on{background:rgba(255,255,255,.22);opacity:1}
-#np-car{--dx:0px;--slw:min(62vw,236px);position:relative;display:flex;align-items:center;justify-content:center;gap:16px;margin:14px 0 10px;touch-action:pan-y;overflow:visible;width:100%}
+#np-car{--dx:0px;--slw:min(74vw,300px);position:relative;display:flex;align-items:center;justify-content:center;gap:16px;margin:14px 0 10px;touch-action:pan-y;overflow:visible;width:100%}
 #np-car.solo .sp,#np-car.solo .sn{display:none}
 .np-sl{flex:none;width:var(--slw);aspect-ratio:1;transform:translate3d(var(--dx),0,0);will-change:transform}
 .np-sl img{width:100%;height:100%;object-fit:cover;border-radius:12px;display:block;background:#1c1c20;box-shadow:0 14px 36px rgba(0,0,0,.5)}
@@ -607,3 +616,29 @@ html[data-theme=light] #ntpop{background:#fff}
 body.playing #np-art{animation:none!important}
 html.bgd *,html.bgd *::before,html.bgd *::after{animation:none!important;transition:none!important}
 @media (prefers-reduced-motion:reduce){*{animation:none!important}}
+
+/* ═════════ v23.4 fixes ═════════ */
+/* 1) no scrollbar sliver / straight vertical line on the side of the screen */
+html,body{overflow-x:hidden}
+#view,#np,#np-pan,.pan-body,#lyv-box,#np-queue{scrollbar-width:none;-ms-overflow-style:none}
+#view::-webkit-scrollbar,#np::-webkit-scrollbar,#np-pan::-webkit-scrollbar,.pan-body::-webkit-scrollbar,#lyv-box::-webkit-scrollbar,#np-queue::-webkit-scrollbar{width:0;height:0;display:none}
+/* 2) heart: outline -> solid fill (Now Playing + mini + sheet/menus) */
+#np-like .fl{fill:none;stroke:currentColor;stroke-width:1.9;stroke-linejoin:round}
+#np-like .fl.on{fill:currentColor;stroke:none}
+#np-like.on{color:#ff4d6d}
+#mini-like .fl{fill:none;stroke:currentColor;stroke-width:1.9}
+#mini-like .fl.on{fill:currentColor;stroke:none}
+#mini-like.on{color:#ff4d6d}
+.ic .fl.on,svg .fl.on{fill:currentColor}
+/* 3) bigger Now Playing cover, next song peeking behind */
+.np-sl img{border-radius:14px}
+.np-sl.sp img,.np-sl.sn img{opacity:.5;transform:scale(.9)}
+/* 4) keep the mini controls from being squeezed on very narrow phones */
+@media (max-width:360px){#mini{height:56px;gap:6px}#mini img{width:40px;height:40px}#mini .mctl .ib{width:32px;height:32px}#mini .mctl .ib svg{width:21px;height:21px}}
+
+/* v23: announcement emoji picker + upload */
+.an-em-row{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 10px}
+.an-em-row button{width:44px;height:44px;padding:0;border:2px solid transparent;border-radius:12px;background:rgba(255,255,255,.06);display:grid;place-items:center;cursor:pointer}
+.an-em-row button img{width:30px;height:30px;display:block;border-radius:8px;object-fit:cover}
+.an-em-row button.on{border-color:var(--acc,#7c5cff);background:rgba(124,92,255,.18)}
+.an-em-row .an-em-up{font-size:24px;line-height:1;color:var(--sub,#9aa);font-weight:300}
