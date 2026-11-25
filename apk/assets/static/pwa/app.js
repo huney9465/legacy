@@ -16,7 +16,7 @@
    NOTE: bump CV below together with APP_VERSION in pwa.py on every release. */
 (() => {
 'use strict';
-const CV = '22.3';
+const CV = "23.0";
 /* APK mode: the Android app bundles these files and talks to the server over HTTPS with a token (window.LM_BASE is set by its index.html).
    On the website / installed PWA LM_BASE is empty and everything works exactly as before (cookie login, same origin). */
 const NAT = (typeof window.LM_BASE === 'string' && window.LM_BASE) ? window.LM_BASE.replace(/\/$/, '') : '';
@@ -299,7 +299,7 @@ async function preloadNext() {
    The OS only keeps the card while a session exists — this is why the old build sometimes "lost" it. */
 function mediaMeta(t) {
   if (!('mediaSession' in navigator) || !t) return;
-  const hi = artHi(t), lo = art(t);
+  const hi = fixUrl(artHi(t)), lo = fixUrl(art(t));
   const sizes = ['96x96', '256x256', '512x512'];
   const artwork = sizes.map(s => ({ src: lo, sizes: s, type: 'image/jpeg' }));
   if (hi && hi !== lo) artwork.push({ src: hi, sizes: '1280x720', type: 'image/jpeg' });
@@ -584,13 +584,13 @@ function eqApply() {
     }
     au.volume = 1;
     const t = AX.ctx.currentTime, set = (p, v) => p.setTargetAtTime(v, t, .06);
-    set(AX.warm.gain, 1.2);                                   // deeper, warmer body
-    set(AX.bass.gain, on ? (pr ? 4 : 3.5) : 0);               // bass boost: body
-    set(AX.thump.gain, on ? (pr ? 5 : 4.5) : 0);              // bass boost: the "dhamak"
-    set(AX.mud.gain, pr ? -1.5 : 0);                          // premium: cleaner low-mids
-    set(AX.pres.gain, pr ? -1.6 : -2.2);                      // softer 3-4 kHz (less sharp / tikhi)
-    set(AX.hi.gain, pr ? -1.5 : -2.5);                        // softer top end
-    AX.base = on ? .62 : .78;
+    set(AX.warm.gain, 2.2);                                   // deeper, warmer body
+    set(AX.bass.gain, on ? (pr ? 5.5 : 5) : .6);              // bass boost: body
+    set(AX.thump.gain, on ? (pr ? 6.5 : 6) : .4);             // bass boost: the "dhamak"
+    set(AX.mud.gain, pr ? -1.2 : -.4);                        // cleaner low-mids
+    set(AX.pres.gain, pr ? -2.6 : -3.2);                      // softer 3-4 kHz (less sharp / tikhi)
+    set(AX.hi.gain, pr ? -2.6 : -3.6);                        // softer top end
+    AX.base = on ? .64 : .8;
     set(AX.out.gain, AX.base * fadeM * duckM);                // overall lower level (bass boost adds energy, so a bit lower again)
     if (AX.ctx.state === 'suspended') AX.ctx.resume().catch(() => {});
   } catch (e) { try { au.volume = VOL_PLAIN * fadeM } catch (e2) {} }
@@ -659,8 +659,10 @@ function setSleep(min) {
 }
 
 /* ───────── now-playing UI ───────── */
-const LK_OFF = '<path class="fl" d="M9 21h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2zM9 9l4.34-4.34L12 10h9v2l-3 7H9V9zM1 9h4v12H1z"/>',
-  LK_ON = '<path class="fl on" d="M1 21h4V9H1v12zM23 10c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z"/>';
+/* v23.4: a clean heart. Outline when not liked, solid fill when liked (no more "double" thumbs-up). */
+const HEART = 'M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z',
+  LK_OFF = `<path class="fl" d="${HEART}"/>`,
+  LK_ON = `<path class="fl on" d="${HEART}"/>`;
 let _pp = null, _mode = '', _tint = '';
 function setLikeIcon(spin) {
   const b = $('#np-like'), i = $('#np-add-icon'); if (!b || !i) return; const on = !!(S.cur && S.liked[S.cur.uri]);
@@ -697,19 +699,21 @@ function ui(light) {
   const pl = !!S.playing; if (document.body.classList.contains('playing') !== pl) document.body.classList.toggle('playing', pl);
   nativeSync();
   $('#mini').hidden = !t; if (!t) { $('#np').hidden = true; PAN.open = false; $('#np-pan').classList.remove('on'); lyvHide(); return }
-  if (document.hidden) return;      // v23: no screen work while the phone is locked (one full refresh runs the moment it wakes up) -> no lag
-  const pos = phone ? au.currentTime * 1000 : S.pos, dur = phone ? ((isFinite(au.duration) && au.duration > 0) ? au.duration * 1000 : t.duration) : S.dur;
-  $('#mini-bar').style.width = dur ? Math.min(100, pos / dur * 100) + '%' : '0';
-  if (_pp !== pl) { _pp = pl; const pp = pl ? PAUSE : PLAY; $('#mini-pp').innerHTML = pp; $('#np-pp').innerHTML = pp; $('#pan-pp').innerHTML = pp }
-  const key = t.title + t.author;
-  if ($('#mini-t').dataset.k !== key) {
-    $('#mini-t').dataset.k = key;
+  /* v23.4: keep the mini player (cover / title / like) correct even while the phone is locked or another app is in front.
+     Before, we bailed out here, so on many phones the top player looked "empty" or did not refresh until a full wake. */
+  const mkey = t.title + '|' + t.author;
+  if ($('#mini-t').dataset.k !== mkey) {
+    $('#mini-t').dataset.k = mkey;
     $('#mini-t').textContent = t.title; $('#mini-s').textContent = t.author;
     $('#mini-art').src = art(t); $('#np-art').src = artHi(t);
     $('#np-t').textContent = t.title; $('#np-s').textContent = t.author;
     setLikeIcon(false); tintFor(t); lyricsLoad(t); artistCard(t); miniLike(); panHead(); PAN.rel = ''; if (PAN.open && PAN.tab === 'rel') relLoad();
-    if (!light) document.querySelectorAll('.row.on').forEach(r => r.classList.remove('on'));
+    if (!light && !document.hidden) document.querySelectorAll('.row.on').forEach(r => r.classList.remove('on'));
   }
+  if (_pp !== pl) { _pp = pl; const pp = pl ? PAUSE : PLAY; $('#mini-pp').innerHTML = pp; $('#np-pp').innerHTML = pp; $('#pan-pp').innerHTML = pp }
+  if (document.hidden) { nativeSync(); return }      // v23: no heavy screen work while the phone is locked (one full refresh runs the moment it wakes up) -> no lag
+  const pos = phone ? au.currentTime * 1000 : S.pos, dur = phone ? ((isFinite(au.duration) && au.duration > 0) ? au.duration * 1000 : t.duration) : S.dur;
+  $('#mini-bar').style.width = dur ? Math.min(100, pos / dur * 100) + '%' : '0';
   if (!$('#np').hidden) {
     const id = ytId(t);
     carSet();
@@ -913,6 +917,7 @@ const ntLeft = m => {
 };
 function ntCard(m) {
   const k = NT_EM[m.type] || 'announce', label = NT_LBL[m.type] || 'Announcement';
+  const em = m.emoji ? '/static/emojis/' + m.emoji : '/static/emojis/' + k + '.svg';
   let body = `<p>${esc(m.text)}</p>`;
   if (m.type !== 'announcement' && m.options) {
     if (m.my_response != null && !m._edit) {
@@ -925,7 +930,7 @@ function ntCard(m) {
   const left = ntLeft(m);
   const raw = (m.created_by_name || '').trim();
   const who = (!raw || /^legacy\s*music$/i.test(raw)) ? 'Official' : raw;
-  return `<div class="nt"><div class="nt-top"><img class="em" src="/static/emojis/${k}.svg" alt=""><b>${label}${m.title ? ' — ' + esc(m.title) : ''}</b></div>`
+  return `<div class="nt"><div class="nt-top"><img class="em" src="${em}" alt=""><b>${label}${m.title ? ' — ' + esc(m.title) : ''}</b></div>`
     + `<div class="nt-by"><img class="lg" src="/static/emojis/legacy.svg" alt=""><span class="nm">Legacy Music</span><i>·</i><span class="who">${esc(who)}</span></div>`
     + body + (left ? `<div class="nt-exp">${esc(left)}</div>` : '') + `</div>`;
 }
@@ -1278,9 +1283,11 @@ const carEl = $('#np-car'), imgP = $('#np-art-p'), imgN = $('#np-art-n'); let ca
 function carSet() {
   if (mode() !== 'phone') { carEl.classList.add('solo'); return }
   const pv = S.queue[S.qi - 1], nx = S.queue[S.qi + 1], k = (pv ? pv.uri || pv.title : '') + '|' + (nx ? nx.uri || nx.title : '');
-  if (k === carKey) return; carKey = k; carEl.classList.remove('solo');
+  if (k === carKey) return; carKey = k;
   const set = (im, t) => { if (t) { im.dataset.fb = art(t); im.style.visibility = ''; im.src = artHi(t) } else { im.style.visibility = 'hidden'; im.removeAttribute('src') } };
   set(imgP, pv); set(imgN, nx);
+  /* v23.6: if there is no next/previous song, hide the side covers completely instead of leaving two empty grey boxes */
+  carEl.classList.toggle('solo', !pv && !nx);
 }
 function goPrev(fromLock) { if (mode() !== 'phone') return act.prev(); if (au.currentTime > 4 && fromLock) { au.currentTime = 0; return } if (S.qi > 0) { S.qi--; startPhone(false) } else au.currentTime = 0 }
 (() => {   // swipe the cover left / right = next / previous song
@@ -1460,7 +1467,7 @@ async function pfSave(el) {
   } catch (er) { el.disabled = false; if (er.status === 403) premiumSheet('Creating playlists is a Premium feature.'); else toast(er.message) }
 }
 
-/* ── Admin (staff only). Needs the /api/app/admin/* endpoints on the server (see lm_admin_api.py) ── */
+/* ── Admin (staff only). Needs the /api/app/admin/* endpoints on the server (see appsync.py) ── */
 const isOwner = () => S.cfg.role === 'owner';
 let admLiveT = null;
 function admCount(el, to) { const from = +el.dataset.v || 0; el.dataset.v = to; const t0 = performance.now(); (function f(n) { const k = Math.min(1, (n - t0) / 900); el.textContent = Math.round(from + (to - from) * (1 - Math.pow(1 - k, 3))); if (k < 1) requestAnimationFrame(f) })(t0) }
@@ -1469,7 +1476,7 @@ async function admLive() {
   try { const d = await api('/api/app/admin/logins?limit=1'); const el = $('#adm-live-n'); if (el) admCount(el, d.total != null ? d.total : arr(d.users).length) } catch (e) {}
   admLiveT = setTimeout(admLive, 20000);
 }
-const admErr = e => `<div class="notice">${e.status === 404 || e.status === 405 ? 'Your server does not have the Admin API yet. Add <b>lm_admin_api.py</b> to the server (it came with this update) and restart it.' : esc(e.message || 'Failed')}</div>`;
+const admErr = e => `<div class="notice">${e.status === 404 || e.status === 405 ? 'Admin API not found on the server. Copy the new <b>appsync.py</b> into the dashboard folder and restart the bot.' : esc(e.message || 'Failed')}</div>`;
 const anOptRows = (opts) => (opts && opts.length ? opts : ['', '']).map((v, i) => `<div class="an-opt"><span class="n">${i + 1}</span><input class="an-oi" maxlength="60" placeholder="Option ${i + 1}" value="${esc(v || '')}">${i > 1 ? '<button class="an-x" data-a="an-opt-del" data-i="' + i + '" aria-label="Remove">✕</button>' : ''}</div>`).join('');
 const anOptsRead = () => [...document.querySelectorAll('#an-opt-list .an-oi')].map(i => i.value.trim()).filter(Boolean);
 const anOptsPaint = () => { const l = $('#an-opt-list'); if (!l) return; ADM.anOpts = anOptsRead(); l.innerHTML = anOptRows(ADM.anOpts.length ? ADM.anOpts : ['', '']); };
@@ -1502,6 +1509,8 @@ async function adminPage(tab) {
       h = `<div class="box an-box"><h3><img class="em-lg" src="/static/emojis/announce.svg" alt=""> New post</h3>
         <span class="sub">Shows in the bell on every phone — as an announcement, a poll or a question.</span>
         <div class="an-seg" id="an-type">${[['announcement', 'announce', 'Announcement'], ['poll', 'poll', 'Poll'], ['question', 'question', 'Question']].map(([k, e, n]) => `<button data-a="an-type" data-k="${k}" class="${ADM.anType === k ? 'on' : ''}"><img class="em" src="/static/emojis/${e}.svg" alt=""><span>${n}</span></button>`).join('')}</div>
+        <span class="lbl">Card emoji</span>
+        <div class="an-em-row" id="an-em-row">${(() => { const base = ['announce.svg', 'poll.svg', 'question.svg', 'legacy.svg']; const cur = ADM.anEmoji || 'announce.svg'; const all = base.includes(cur) ? base : [cur].concat(base); return all.map(f => `<button data-a="an-em" data-k="${f}" class="${cur === f ? 'on' : ''}"><img src="/static/emojis/${f}" alt=""></button>`).join('') })()}<button class="an-em-up" data-a="an-em-up" title="Upload your own emoji">+</button></div>
         <input id="an-t" maxlength="80" placeholder="Title">
         <textarea id="an-x" maxlength="800" rows="4" placeholder="Message"></textarea>
         <div id="an-opts" ${ADM.anType === 'announcement' ? 'hidden' : ''}><span class="lbl">Options — people pick one</span><div id="an-opt-list">${anOptRows(ADM.anOpts)}</div><button class="btn sm ghost" data-a="an-opt-add">+ Add option</button></div>
@@ -1523,6 +1532,29 @@ async function adminPage(tab) {
   if (my !== RT) return; $('#adm-body').innerHTML = h;
 }
 const admP = p => { const k = plTickKind(p); return `<div class="row adm-u"><span class="th" style="${bgi(fixUrl(p.cover) || fixUrl(p.cover_image_url) || '/static/pwa/icon-192.png')}"></span><span class="tx"><span class="t">${esc(p.name)} ${k ? tick(k) : ''}</span><span class="s">${esc(p.code)} · ${esc(p.owner_name || '')} · ${p.tracks != null ? p.tracks + ' songs · ' : ''}👁 ${fmtViews(p.views || 0)}${p.source ? ' · ' + esc(p.source) : ''}</span></span>${isOwner() ? `<button class="btn sm ghost" data-a="adm-pl" data-code="${esc(p.code)}">Manage</button>` : ''}</div>` };
+/* v23: upload your own emoji art for announcements (saved in static/emojis/) */
+const anEmojiFile = (() => {
+  const i = document.createElement('input'); i.type = 'file'; i.accept = 'image/svg+xml,image/png,image/jpeg,image/webp,image/gif'; i.hidden = true; document.body.appendChild(i);
+  i.addEventListener('change', async () => {
+    const f = i.files[0]; if (!f) return;
+    if (f.size > 1048576) return toast('Keep the emoji under 1 MB');
+    const fd = new FormData(); fd.append('file', f, f.name);
+    try {
+      const r = await fetch(U('/api/app/admin/emoji'), { method: 'POST', credentials: NAT ? 'omit' : 'same-origin', headers: TOK ? { Authorization: 'Bearer ' + TOK } : { 'X-LM-Platform': 'pwa' }, body: fd });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.detail || 'Upload failed');
+      ADM.anEmoji = j.key;
+      const row = $('#an-em-row');
+      if (row) {
+        let b = row.querySelector(`button[data-k="${j.key}"]`);
+        if (!b) { b = document.createElement('button'); b.dataset.a = 'an-em'; b.dataset.k = j.key; b.innerHTML = `<img src="${j.url}" alt="">`; row.insertBefore(b, row.lastElementChild) }
+        row.querySelectorAll('button[data-a="an-em"]').forEach(x => x.classList.toggle('on', x.dataset.k === j.key));
+      }
+      toast('Emoji added'); buzz();
+    } catch (er) { toast(er.message || 'Upload failed') }
+  });
+  return i;
+})();
 const admApk = (() => { const i = document.createElement('input'); i.type = 'file'; i.accept = '.apk,application/vnd.android.package-archive'; i.hidden = true; document.body.appendChild(i); i.addEventListener('change', () => { const n = $('#adm-apk-n'); if (n) n.textContent = i.files[0] ? i.files[0].name + ' (' + (i.files[0].size / 1048576).toFixed(1) + ' MB)' : 'No file chosen' }); return i })();
 async function admPush() {
   const v = ($('#adm-ver').value || '').trim(), n = ($('#adm-notes').value || '').trim(), f = admApk.files[0]; if (!v) return toast('Enter a version');
@@ -1743,7 +1775,7 @@ async function copyText(txt, msg) {
   toast(msg || 'Copied'); buzz();
 }
 const songLink = t => t.uri && /^https?:/.test(t.uri) ? t.uri : (ytId(t) ? 'https://www.youtube.com/watch?v=' + ytId(t) : (NAT || location.origin));
-// v24: this link opens the APP when it is installed (and offers the APK when it is not); the page /open/pl/<code> lives in lm_admin_api.py
+// v24: this link opens the APP when it is installed (and offers the APK when it is not); the page /open/pl/<code> lives in the server dashboard
 async function plTracks(code) {
   let p; try { p = await api('/api/playlist/info?code=' + encodeURIComponent(code)) } catch (e) { p = await api('/api/playlists/code/' + encodeURIComponent(code)) }
   return arr(p.tracks).map(nt);
@@ -1993,6 +2025,8 @@ document.addEventListener('click', async e => {
   else if (a === 'adm-pl-del') { if (!confirm('Delete this playlist?')) return; try { await api('/api/app/admin/playlist/' + encodeURIComponent(el.dataset.code), { method: 'DELETE' }); closeSheet(); toast('Deleted'); adminPage('playlists') } catch (er) { toast(er.message || 'Failed') } }
   else if (a === 'an-type') { ADM.anOpts = anOptsRead(); ADM.anType = el.dataset.k; document.querySelectorAll('#an-type button').forEach(b => b.classList.toggle('on', b.dataset.k === ADM.anType)); const o = $('#an-opts'); if (o) o.hidden = ADM.anType === 'announcement' }
   else if (a === 'an-dur') { ADM.anDur = el.dataset.v; document.querySelectorAll('#an-dur button').forEach(b => b.classList.toggle('on', b.dataset.v === ADM.anDur)) }
+  else if (a === 'an-em') { ADM.anEmoji = el.dataset.k; document.querySelectorAll('#an-em-row button[data-a="an-em"]').forEach(b => b.classList.toggle('on', b.dataset.k === ADM.anEmoji)) }
+  else if (a === 'an-em-up') { anEmojiFile.value = ''; anEmojiFile.click() }
   else if (a === 'an-opt-add') { ADM.anOpts = anOptsRead(); if (ADM.anOpts.length >= 6) return toast('Up to 6 options'); ADM.anOpts.push(''); anOptsPaint(); const ins = document.querySelectorAll('#an-opt-list .an-oi'); if (ins.length) ins[ins.length - 1].focus() }
   else if (a === 'an-opt-del') { ADM.anOpts = anOptsRead(); ADM.anOpts.splice(+el.dataset.i, 1); anOptsPaint() }
   else if (a === 'adm-announce') {
@@ -2001,6 +2035,7 @@ document.addEventListener('click', async e => {
     if (!t || !x) return toast('Write a title and a message');
     if (type !== 'announcement' && opts.length < 2) return toast('Add at least 2 options');
     const body = { title: t, text: x, type }; if (opts.length) body.options = opts;
+    if (ADM.anEmoji) body.emoji = ADM.anEmoji;
     const hrs = +ADM.anDur; if (hrs > 0) { body.expires_in_hours = hrs; body.expires_at = new Date(Date.now() + hrs * 3600000).toISOString() }
     const sb = document.querySelector('[data-a="adm-announce"]'); if (sb) { if (sb.disabled) return; sb.disabled = true }
     try {
