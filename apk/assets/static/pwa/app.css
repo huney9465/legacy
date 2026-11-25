@@ -455,7 +455,7 @@ html.bgd *,html.bgd *::before,html.bgd *::after{animation-play-state:paused!impo
 /* FIX: playlist preview — allow pinch-to-zoom + drag-to-reposition gestures */
 .pf-prev{flex:none;background:var(--s2) center/cover;border-radius:10px;border:1px dashed rgba(255,255,255,.3);touch-action:none;cursor:grab}
 .pf-prev.sq{width:96px;height:96px}.pf-prev.wide{width:170px;height:86px}.pf-prev.has{border-style:solid}
-.pf-prev.has::after{content:"Pinch to zoom";position:absolute;bottom:4px;left:50%;transform:translateX(-50%);font:600 10px Inter,sans-serif;color:rgba(255,255,255,.75);background:rgba(0,0,0,.55);padding:2px 8px;border-radius:99px;pointer-events:none;white-space:nowrap;opacity:0;transition:opacity .4s}
+.pf-prev.has::after{content:"";position:absolute;bottom:4px;left:50%;transform:translateX(-50%);font:600 10px Inter,sans-serif;color:rgba(255,255,255,.75);background:rgba(0,0,0,.55);padding:2px 8px;border-radius:99px;pointer-events:none;white-space:nowrap;opacity:0;transition:opacity .4s}
 .pf-pick:hover .pf-prev.has::after,.pf-pick:focus-within .pf-prev.has::after{opacity:1}
 .pf-pick{position:relative}
 .pf-pick>div{display:flex;gap:8px;flex-wrap:wrap}
@@ -642,3 +642,23 @@ html,body{overflow-x:hidden}
 .an-em-row button img{width:30px;height:30px;display:block;border-radius:8px;object-fit:cover}
 .an-em-row button.on{border-color:var(--acc,#7c5cff);background:rgba(124,92,255,.18)}
 .an-em-row .an-em-up{font-size:24px;line-height:1;color:var(--sub,#9aa);font-weight:300}
+
+/* v24.1 dialogs, photo adjuster, playlist name field */
+.ask-wrap{position:fixed;inset:0;z-index:95;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,.6)}
+.ask-box{width:100%;max-width:340px;background:var(--s1);color:var(--tx);border:1px solid var(--ln);border-radius:18px;padding:20px}
+.ask-box p{margin:0 0 14px;font-weight:600;line-height:1.4}
+.cr-wrap{position:fixed;inset:0;z-index:90;display:flex;align-items:center;justify-content:center;padding:18px;overflow-y:auto;background:rgba(0,0,0,.82)}
+.cr-box{width:100%;max-width:400px;background:var(--s1);color:var(--tx);border:1px solid var(--ln);border-radius:20px;padding:18px;text-align:center}
+.cr-box h3{margin:0 0 4px}.cr-box .sub{margin:0 0 12px}
+.cr-stage{position:relative;margin:0 auto;overflow:hidden;border-radius:14px;touch-action:none;cursor:grab;background:#000;box-shadow:0 0 0 2px var(--br)}
+.cr-stage.round{border-radius:50%}.cr-stage canvas{display:block}
+.cr-zoom{display:flex;align-items:center;gap:10px;margin:14px 6px 4px}.cr-zoom input{flex:1;accent-color:var(--br)}.cr-zoom span{font-weight:800;color:var(--mu)}
+.cr-row{display:flex;gap:8px;justify-content:center;margin:8px 0}
+.pf-namebox{display:flex;align-items:center;gap:12px;margin:14px 0 4px;padding:12px 14px;border:1px solid var(--ln);border-radius:16px;background:linear-gradient(135deg,var(--s1),var(--s2));transition:border-color .2s,box-shadow .2s}
+.pf-namebox:focus-within{border-color:var(--br);box-shadow:0 0 0 3px rgba(120,140,255,.22)}
+.pf-nico{flex:none;width:42px;height:42px;border-radius:12px;display:grid;place-items:center;background:var(--br);color:#fff}
+.pf-nico svg{width:22px;height:22px}
+.pf-nin{flex:1;min-width:0}.pf-nin label{display:block;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--mu);margin-bottom:2px}
+.pf-nin input{width:100%;border:0;outline:0;background:transparent;color:var(--tx);font:700 18px/1.3 inherit;padding:2px 0}
+.pf-nin input::placeholder{color:var(--mu);font-weight:500}
+.pf-cnt{flex:none;font-size:11px;color:var(--mu)}
