@@ -1,4 +1,4 @@
-/* Legacy Music app (v23.0). Installed app = plays in the phone. Website = plays in the Discord voice channel.
+/* Legacy Music app (v22.3). Installed app = plays in the phone. Website = plays in the Discord voice channel.
    v20: previous button, autoplay, lock-screen / notification-shade controls (Media Session), offline downloads (Premium),
         saved playlists, themes (Auto / Dark / White / AMOLED), update checker, sleep timer, repeat / shuffle, smarter search.
    v21: recently played row (songs + playlists), collaborative playlists (Premium, invite-link based),
@@ -1283,7 +1283,7 @@ async function playlist(code) {
     const names = [], addName = x => { if (x == null || x === '') return; const n = (typeof x === 'object') ? (x.display_name || x.username || x.name || (x.id ? 'User ' + x.id : '')) : String(x); if (n && !names.some(o => o.toLowerCase() === n.toLowerCase())) names.push(n) };
     addName(p.owner_name); (Array.isArray(p.collaborators) ? p.collaborators : []).forEach(addName);
     const collabLine = (p.collab || names.length > 1) && names.length ? `<div class="sub" style="margin:14px 0 6px">👥 Collab with: ${names.map(esc).join(', ')}</div>` : '';
-    view.innerHTML = `<button class="btn sm ghost" data-a="pl-back" style="margin:2px 0 8px">‹ Back</button><div class="hero big"><div class="ban" data-plcode="${esc(up)}" data-plkind="bg" style="${bgi(ban)}"></div><div class="in"><span class="cv" data-plcode="${esc(up)}" style="${bgi(cover)}"></span><div><h1>${esc(p.name)}</h1>${plOwnerLine(p)}<div class="sub">${L.pl.length} songs${p.collab ? ' · Collab' : ''}${p.views != null && !p.owner_name ? ' · ' + fmtViews(p.views) + ' views' : ''}</div></div></div></div>
+    view.innerHTML = `<button class="btn sm ghost" data-a="pl-back" style="margin:2px 0 8px">‹ Back</button><div class="hero big"><div class="ban" data-plcode="${esc(up)}" data-plkind="bg" style="${bgi(ban)}"></div><div class="in"><span class="cv" data-plcode="${esc(up)}" style="${bgi(cover)}">${plCvTick(p)}</span><div><h1>${esc(p.name)}</h1>${plOwnerLine(p)}<div class="sub">${L.pl.length} songs${p.collab ? ' · Collab' : ''}${p.views != null && !p.owner_name ? ' · ' + fmtViews(p.views) + ' views' : ''}</div></div></div></div>
       ${privNotice}
       <div class="actions"><button class="btn" data-a="pl-play">${ic('play', 'fill')} Play</button><button class="btn ghost" data-a="pl-shuffle">${ic('shuffle')} Shuffle</button>
       ${code !== 'liked' && !p.is_owner ? `<button class="btn ghost saveb${saved ? ' on' : ''}" data-a="pl-save" data-code="${esc(up)}">${ic('bookmark')} <span>${saved ? 'Saved' : 'Save'}</span></button>` : ''}
@@ -1438,15 +1438,17 @@ async function lyricsFallback(t) {
 /* ── playlist ticks, owner logo, views ── */
 const PTK = { map: {} };
 async function ptkLoad() { try { const d = await api('/api/app/pl-ticks'); PTK.map = (d && d.ticks) || {} } catch (e) {} }
-const plTickKind = p => { const c = String(p.code || '').toUpperCase(); return PTK.map[c] || p.tick || (p.owner_role === 'owner' ? 'owner' : ['premium', 'admin'].includes(p.owner_role) ? 'premium' : '') };
+const plTickKind = p => { const c = String(p.code || '').toUpperCase(); const m = (c in PTK.map) ? PTK.map[c] : (p.badge || p.tick || ''); return m || (p.owner_role === 'owner' ? 'owner' : ['premium', 'admin'].includes(p.owner_role) ? 'premium' : '') };
 /* v23.0: the creator's tick sits ON the creator's logo (top-right, like a verified badge) and the name follows.
    Before this the tick was printed outside, next to the name — that is what looked wrong.
    Whatever tick the account has (owner / admin / premium / official) is the one that shows. */
+const plCvTick = p => { const k = plTickKind(p); return (k && TICKS[k]) ? `<img class="cvtick" src="/static/badges/${TICKS[k]}" alt="${esc(k)}">` : '' };
 const plOwnerLine = p => {
   const k = plTickKind(p), av = fixUrl(p.owner_avatar);
   const logo = av ? `<span class="av sm" style="${bgi(av)}">${k ? `<img class="tick" src="/static/badges/${TICKS[k]}" alt="${esc(k)}">` : ''}</span>` : '';
   if (!p.owner_name && !av) return '';
-  return `<div class="plown">${logo}<span class="pn">${esc(p.owner_name || '')}</span>${p.views != null ? `<span class="sub">· ${fmtViews(p.views)} views</span>` : ''}</div>`;
+  const nameTick = (!av && k && TICKS[k]) ? `<img class="tick" src="/static/badges/${TICKS[k]}" alt="${esc(k)}">` : '';
+  return `<div class="plown">${logo}${nameTick}<span class="pn">${esc(p.owner_name || '')}</span>${p.views != null ? `<span class="sub">· ${fmtViews(p.views)} views</span>` : ''}</div>`;
 };
 
 /* ── playlist create / edit as its own full page ── */
@@ -1652,6 +1654,7 @@ function admPlSheet(code) {
 const NAVS = []; let routed = false;
 function navDirection() { const h = location.hash || '#home', n = NAVS.length; if (n >= 2 && NAVS[n - 2] === h) { NAVS.pop(); return -1 } if (NAVS[n - 1] !== h) NAVS.push(h); if (NAVS.length > 40) NAVS.shift(); return 1 }
 function route() {
+  if (NAT && !TOK) { if (!document.body.classList.contains('lg')) showLogin('You are logged out.'); return }   // v23.1: logged out = stay on the login screen (back button must not bring the app back)
   RT++; clearTimeout(st);
   const dir = navDirection(), my = RT;
   view.classList.remove('pg-f', 'pg-b', 'pg-xf', 'pg-xb');
@@ -2247,14 +2250,30 @@ function showLogin(msg) {
   lgCovers().then(l => { const el = $('.lg-bg'); if (l && el && JSON.stringify(l.slice(0, 36)) !== JSON.stringify(cached)) el.innerHTML = lgCols(l) });
   lgCreatorFix();
 }
+function doLogout() {     // v23.1: a real logout - token, profile, cached account and the music notification are all cleared
+  try { store.set('lm-mt', ''); store.set('lm-prof', ''); store.set('lm-me', ''); store.set('lm-cfg', ''); store.set('lm-tok', ''); TOK = ''; MT = '' } catch (e) {}
+  try { au.pause() } catch (e) {}
+  try { if (bridge && bridge.nowPlaying) bridge.nowPlaying('', '', false, '') } catch (e) {}
+  try { history.replaceState(null, '', location.pathname + location.search + '#login') } catch (e) {}
+  showLogin('You are logged out.');
+}
 window.lmOnToken = t => { if (t) { store.set('lm-tok', String(t)); location.reload() } };            // called by the Android app after the Discord login
 async function refreshTokens() {
   if (!NAT || !TOK || !navigator.onLine) return;
   try {
     const r = await api('/api/app/token', { method: 'POST' });
-    if (r && r.token) { TOK = r.token; MT = r.media_token || ''; store.set('lm-tok', TOK); store.set('lm-mt', MT) }
+    if (r && r.token) { const oldMt = MT; TOK = r.token; MT = r.media_token || ''; store.set('lm-tok', TOK); store.set('lm-mt', MT); store.set('lm-tokts', String(Date.now())); swapMt(oldMt, MT) }
   } catch (e) {}
 }
+function swapMt(o, n) {     // v23.1: pictures already on screen keep working after the 6 h media token was renewed
+  if (!o || !n || o === n) return;
+  try {
+    const a = encodeURIComponent(o), b = encodeURIComponent(n);
+    document.querySelectorAll('[style*="mt="]').forEach(el => { el.setAttribute('style', el.getAttribute('style').split(a).join(b)) });
+    document.querySelectorAll('img[src*="mt="]').forEach(i => { i.src = i.src.split(a).join(b) });
+  } catch (e) {}
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden && NAT && TOK && Date.now() - (+store.get('lm-tokts') || 0) > 30 * 60000) refreshTokens() });
 let lastNat = '';
 function nativeSync(force) {
   if (!bridge || !bridge.nowPlaying) return;
@@ -2279,7 +2298,7 @@ if (NAT) {
     const a = e.target.closest('a[href^="/"]'); if (!a) return;
     e.preventDefault(); e.stopPropagation();
     const h = a.getAttribute('href');
-    if (h.startsWith('/auth/logout')) { store.set('lm-mt', ''); store.set('lm-prof', ''); showLogin('You are logged out.'); return }
+    if (h.startsWith('/auth/logout')) { doLogout(); return }
     if (bridge && bridge.open) bridge.open(NAT + h); else window.open(NAT + h, '_blank');
   }, true);
 }
@@ -2358,7 +2377,7 @@ function usernameSetup() {      // first Google login: must choose a username be
   });
 }
 async function editProfile() {
-  if (!S.prof) { try { S.prof = await api('/api/app/profile') } catch (e) { return toast('Update the server (profile_api.py) to edit your profile') } }
+  if (!S.prof) { try { S.prof = await api('/api/app/profile') } catch (e) { return toast(e && e.status === 404 ? 'Update the server (profile_api.py) to edit your profile' : 'Could not open your profile: ' + ((e && e.message) || 'try again')) } }
   const p = S.prof, dc = p.provider === 'discord';
   sheet(`<h3>Edit profile</h3>
     ${dc ? `<div class="pf-top"><span class="us-av" style="${pfAv()}"></span><div class="pf-btns"><span class="sub">Discord login: you can change the name shown in the app. Your username stays the same.</span></div></div>`
@@ -2381,6 +2400,38 @@ async function epSave() {
   try { const r = await api('/api/app/profile', { method: 'POST', body }); applyProfile(r); refreshTopAv(); closeSheet(); toast('Profile saved'); if (location.hash === '#you') you() }
   catch (e) { toast(e.message) }
 }
+
+/* ───────── v23.1: pull down to refresh (like Spotify) ───────── */
+(function () {
+  const ind = document.createElement('div'); ind.id = 'ptr'; ind.innerHTML = '<i></i>'; document.body.appendChild(ind);
+  let y0 = 0, x0 = 0, dy = 0, on = false, busy = false, locked = false;
+  const TH = 64;
+  const blocked = t => !!(t && t.closest && t.closest('input,textarea,select,#np,#np-pan,#lyv,#sheet,.cr-wrap,.ask-wrap,.us-wrap,#ntpop,.cards,.chips,.adm-seg'));
+  const set = (px, spin) => { ind.style.opacity = px > 6 || spin ? 1 : 0; ind.style.transform = `translateY(${Math.round(px) - 56}px) rotate(${Math.round(px * 4)}deg)`; ind.classList.toggle('spin', !!spin) };
+  document.addEventListener('touchstart', e => {
+    on = false; locked = false; dy = 0;
+    if (busy || e.touches.length !== 1 || (window.scrollY || 0) > 0 || document.body.classList.contains('lg') || blocked(e.target)) return;
+    if (!$('#np').hidden || !$('#sheet').hidden) return;
+    y0 = e.touches[0].clientY; x0 = e.touches[0].clientX; on = true;
+  }, { passive: true });
+  document.addEventListener('touchmove', e => {
+    if (!on || locked) return;
+    const t = e.touches[0], mx = t.clientX - x0; dy = t.clientY - y0;
+    if (Math.abs(mx) > Math.abs(dy) + 6 || dy < 0 || (window.scrollY || 0) > 0) { if (dy < 0 || (window.scrollY || 0) > 0) { on = false; set(0) } return }
+    set(Math.min(dy * 0.5, 84));
+  }, { passive: true });
+  const end = async () => {
+    if (!on) return; on = false;
+    if (dy * 0.5 >= TH * 0.8 && !busy) {
+      busy = true; set(54, true); buzz && buzz(10);
+      try { if (!S.offline) { await Promise.race([Promise.all([ptkLoad(), syncDown().catch(() => {})]), new Promise(r => setTimeout(r, 3500))]) } } catch (e) {}
+      try { route() } catch (e) {}
+      setTimeout(() => { busy = false; set(0) }, 450);
+    } else set(0);
+  };
+  document.addEventListener('touchend', end, { passive: true });
+  document.addEventListener('touchcancel', () => { on = false; set(0) }, { passive: true });
+})();
 
 /* ───────── start ───────── */
 (async () => {
