@@ -16,7 +16,7 @@
    NOTE: bump CV below together with APP_VERSION in pwa.py on every release. */
 (() => {
 'use strict';
-const CV = "23.0";
+const CV = '22.3';
 /* APK mode: the Android app bundles these files and talks to the server over HTTPS with a token (window.LM_BASE is set by its index.html).
    On the website / installed PWA LM_BASE is empty and everything works exactly as before (cookie login, same origin). */
 const NAT = (typeof window.LM_BASE === 'string' && window.LM_BASE) ? window.LM_BASE.replace(/\/$/, '') : '';
