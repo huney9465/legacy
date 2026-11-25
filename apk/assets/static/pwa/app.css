@@ -210,6 +210,10 @@ h2 small[data-go],h2 small[data-a]{cursor:pointer;color:var(--br)}
 
 /* announcements / polls (bell) */
 .ib{position:relative}.ib .ndot{position:absolute;top:8px;right:9px;width:10px;height:10px;border-radius:50%;background:#f43f5e;border:2px solid var(--bg)}
+/* v23.2: the bell badge is a counter (1, 2, 3 … 9+), not a plain dot */
+.ib .ndot.num{top:2px;right:2px;min-width:18px;height:18px;width:auto;padding:0 4px;border-radius:999px;border:2px solid var(--bg);
+  background:linear-gradient(135deg,#ff4d6d,#e11d48);color:#fff;font:800 10.5px/14px system-ui,-apple-system,sans-serif;text-align:center;
+  letter-spacing:-.2px;box-shadow:0 2px 8px rgba(225,29,72,.55);display:grid;place-items:center}
 .nt{background:var(--s2);border-radius:14px;padding:13px 14px;margin:10px 0;text-align:left}
 .nt b{display:block;margin-bottom:4px}.nt p{margin:6px 0;white-space:pre-wrap;word-break:break-word}.nt .by{font-size:12px;opacity:.65;margin-bottom:4px}
 .nt .nt-radio{display:flex;gap:10px;align-items:center;padding:9px 2px}.nt .nt-opt{margin:8px 0;font-size:13.5px}.nt .nt-opt>div:first-child{display:flex;justify-content:space-between}
@@ -375,16 +379,15 @@ html.bgd *,html.bgd *::before,html.bgd *::after{animation-play-state:paused!impo
 .np-seg{display:flex;background:rgba(255,255,255,.12);border-radius:20px;padding:3px}
 .np-seg button{border:0;background:none;color:#fff;font:700 13px Inter,sans-serif;padding:6px 20px;border-radius:17px;opacity:.75}
 .np-seg button.on{background:rgba(255,255,255,.22);opacity:1}
-#np-car{--dx:0px;position:relative;display:flex;align-items:center;justify-content:center;gap:16px;margin:12px 0 10px;touch-action:pan-y;overflow:visible;width:100%}
+#np-car{--dx:0px;--slw:min(62vw,236px);position:relative;display:flex;align-items:center;justify-content:center;gap:16px;margin:14px 0 10px;touch-action:pan-y;overflow:visible;width:100%}
 #np-car.solo .sp,#np-car.solo .sn{display:none}
-.np-sl{flex:none;width:84vw;max-width:340px;aspect-ratio:1;transform:translate3d(var(--dx),0,0);will-change:transform}
-.np-sl img{width:100%;height:100%;object-fit:cover;border-radius:10px;display:block;background:#1c1c20;box-shadow:0 14px 36px rgba(0,0,0,.5)}
+.np-sl{flex:none;width:var(--slw);aspect-ratio:1;transform:translate3d(var(--dx),0,0);will-change:transform}
+.np-sl img{width:100%;height:100%;object-fit:cover;border-radius:12px;display:block;background:#1c1c20;box-shadow:0 14px 36px rgba(0,0,0,.5)}
 .np-sl.sp img,.np-sl.sn img{opacity:.55;transform:scale(.94)}
 #np-car.solo{gap:0}
-#np-car:not(.solo) .sp{margin-left:calc(-84vw - 16px + 14px)}
 #np-car:not(.solo) .sp,#np-car:not(.solo) .sn{margin-right:0}
-#np-car:not(.solo){justify-content:flex-start;padding-left:calc((100% - min(84vw,340px))/2);gap:16px}
-#np-car:not(.solo) .sp{margin-left:calc(-1 * (min(84vw,340px) + 16px))}
+#np-car:not(.solo){justify-content:flex-start;padding-left:calc((100% - var(--slw))/2);gap:16px}
+#np-car:not(.solo) .sp{margin-left:calc(-1 * (var(--slw) + 16px))}
 #np-car.drag .np-sl{transition:none}
 #np-car.fly .np-sl{transition:transform .3s ease-out}
 #np-car.snap .np-sl{transition:none}
@@ -450,9 +453,11 @@ html.bgd *,html.bgd *::before,html.bgd *::after{animation-play-state:paused!impo
 .pf-pick>div{display:flex;gap:8px;flex-wrap:wrap}
 .box.danger{margin-top:26px;border:1px solid rgba(255,80,80,.45)}
 .btn.bad{background:#e5484d;color:#fff}
-.plown{display:flex;align-items:center;gap:6px;margin:4px 0;font-size:13px;font-weight:600}
-.plown .av.sm{position:relative;width:24px;height:24px;border-radius:50%;background:center/cover #333;flex:none}
-.plown .av.sm .tick{position:absolute;right:-4px;bottom:-4px;width:12px;height:12px}
+.plown{display:flex;align-items:center;gap:7px;margin:5px 0;font-size:13px;font-weight:600}
+.plown .pn{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* v23.0: tick sits ON the creator's logo (verified-badge style), not outside next to the name */
+.plown .av.sm{position:relative;width:28px;height:28px;border-radius:50%;background:center/cover #333;flex:none;box-shadow:0 0 0 1.5px rgba(255,255,255,.14)}
+.plown .av.sm .tick{position:absolute;right:-5px;top:-5px;width:16px;height:16px;min-width:0;max-width:none;margin:0;border-radius:50%;background:var(--bg,#0b0c10);box-shadow:0 0 0 1.5px var(--bg,#0b0c10);object-fit:contain}
 .plown .plk .tick{width:16px;height:16px;vertical-align:-3px}
 .tick{width:15px;height:15px;vertical-align:-2px;margin-left:3px}
 .av{position:relative}
@@ -523,3 +528,83 @@ html.bgd *,html.bgd *::before,html.bgd *::after{animation-play-state:paused!impo
 .pf-in:focus{outline:2px solid var(--br);border-color:transparent}
 .us-st{min-height:18px;margin-top:4px;font-size:12.5px;color:var(--mu)}.us-st.ok{color:var(--ok)}.us-st.bad{color:var(--bad)}
 .pf-top{display:flex;align-items:center;gap:14px;margin:6px 0 4px}.pf-top .us-av{margin:6px 0}.pf-btns{display:flex;flex-direction:column;gap:8px}
+
+/* ───────── bell popup (v24.1): notifications drop down under the bell, not from the bottom ───────── */
+#ntpop{position:fixed;top:calc(var(--sat) + 54px);right:10px;left:10px;max-width:352px;margin-left:auto;z-index:45;
+  max-height:min(66vh,520px);overflow-y:auto;overscroll-behavior:contain;
+  background:var(--s1);border:1px solid var(--ln);border-radius:16px;
+  box-shadow:0 18px 48px var(--shadow);padding:10px 12px 12px;
+  transform-origin:top right;animation:ntin .18s cubic-bezier(.2,.9,.25,1) both}
+#ntpop[hidden]{display:none}
+@keyframes ntin{from{opacity:0;transform:translateY(-8px) scale(.97)}to{opacity:1;transform:none}}
+#ntpop .nt-h{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:2px 2px 8px;position:sticky;top:-10px;background:var(--s1);z-index:2}
+#ntpop .nt-h b{font:800 14px Inter,system-ui,sans-serif}
+#ntpop .nt-h .cnt{font-size:11px;color:var(--mu);font-weight:600}
+#ntpop .nt{border-top:1px solid var(--ln);padding:10px 2px}
+#ntpop .nt:first-of-type{border-top:0}
+#ntpop .nt>b{display:block;font-size:13px;margin-bottom:3px}
+#ntpop .nt .by{font-size:11px;color:var(--mu);margin-bottom:5px}
+#ntpop .nt p{margin:0 0 8px;font-size:13px;line-height:1.4;color:var(--tx);opacity:.92}
+#ntpop .nt .btn{width:100%;margin-top:6px}
+#ntpop .nt-radio{display:flex;gap:8px;align-items:center;font-size:13px;padding:5px 0}
+#ntpop .nt-opt{margin:4px 0}
+#ntpop .nt-opt>div:first-child{display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:3px}
+#ntpop .nt-bar{height:5px;border-radius:3px;background:var(--ln);overflow:hidden}
+#ntpop .nt-bar i{display:block;height:100%;background:var(--br)}
+#ntpop .empty{padding:14px 2px;color:var(--mu);font-size:13px}
+html[data-theme=light] #ntpop{background:#fff}
+
+/* ───────── v24.2: custom emoji art + signed notification cards + richer announce form ───────── */
+#ntpop .nt-top{display:flex;align-items:center;gap:7px;margin-bottom:5px}
+#ntpop .nt-top .em{width:19px;height:19px;flex:none;border-radius:6px}
+#ntpop .nt-top b{font-size:13px;margin:0;line-height:1.25}
+#ntpop .nt-by{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--mu);margin-bottom:6px}
+#ntpop .nt-by .lg{width:14px;height:14px;border-radius:4px;flex:none}
+#ntpop .nt-by .nm{font-weight:700;color:var(--tx);opacity:.85}
+#ntpop .nt-by i{opacity:.5;font-style:normal}
+#ntpop .nt-by .who{opacity:.9}
+#ntpop .nt-exp{margin-top:7px;font-size:10.5px;color:var(--mu);letter-spacing:.02em}
+
+.an-box h3{display:flex;align-items:center;gap:8px}
+.an-box .em-lg{width:22px;height:22px;border-radius:7px}
+.an-seg{display:flex;gap:6px;margin:12px 0 2px}
+.an-seg button{flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;padding:9px 4px;border:1px solid var(--ln);border-radius:12px;background:var(--s2);color:var(--tx);font:600 11.5px Inter,sans-serif;cursor:pointer;transition:.18s}
+.an-seg button .em{width:20px;height:20px;border-radius:6px;opacity:.75}
+.an-seg button.on{border-color:var(--br);background:color-mix(in srgb,var(--br) 14%,transparent)}
+.an-seg button.on .em{opacity:1}
+.an-box .lbl{display:block;font:700 11px Inter,sans-serif;letter-spacing:.07em;text-transform:uppercase;color:var(--mu);margin:14px 0 7px}
+#an-opts[hidden]{display:none}
+.an-opt{display:flex;align-items:center;gap:8px;margin-bottom:7px}
+.an-opt .n{width:20px;flex:none;text-align:center;font:700 11px Inter,sans-serif;color:var(--mu)}
+.an-opt input{margin:0!important;flex:1}
+.an-opt .an-x{flex:none;width:28px;height:28px;border:0;border-radius:9px;background:rgba(127,127,127,.16);color:var(--tx);font-size:12px;cursor:pointer}
+.an-dur{display:flex;flex-wrap:wrap;gap:6px}
+.an-dur button{padding:7px 11px;border:1px solid var(--ln);border-radius:999px;background:var(--s2);color:var(--tx);font:600 11.5px Inter,sans-serif;cursor:pointer}
+.an-dur button.on{border-color:var(--br);background:color-mix(in srgb,var(--br) 16%,transparent)}
+.an-hint{margin-top:10px;font-size:11px;color:var(--mu);display:flex;align-items:center;gap:5px}
+.an-hint b{color:var(--tx);opacity:.85}
+
+/* ───────── v23.0: bigger install button, coloured by the song that is playing ───────── */
+:root{--accent:#7c5cff;--accent2:#3b9dff}
+.inst-hero{display:flex;align-items:center;gap:13px;width:100%;margin:14px 0 4px;padding:16px 16px;border:0;border-radius:18px;cursor:pointer;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;text-align:left;
+  box-shadow:0 10px 26px -12px color-mix(in srgb,var(--accent) 75%,transparent);transition:transform .18s,box-shadow .18s}
+.inst-hero:active{transform:scale(.985)}
+.inst-hero .ih-ic{width:44px;height:44px;flex:none;border-radius:14px;display:grid;place-items:center;background:rgba(255,255,255,.2)}
+.inst-hero .ih-ic svg{width:24px;height:24px;stroke:#fff;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.inst-hero .ih-tx{flex:1;min-width:0}
+.inst-hero b{display:block;font:800 15.5px Inter,sans-serif;letter-spacing:-.01em}
+.inst-hero small{display:block;margin-top:2px;font:500 11.5px Inter,sans-serif;opacity:.9}
+.inst-hero .ih-go{flex:none;font:800 12px Inter,sans-serif;padding:8px 13px;border-radius:999px;background:rgba(255,255,255,.22)}
+.inst-hero.sm{padding:12px 14px;border-radius:14px}
+.inst-hero.sm .ih-ic{width:36px;height:36px;border-radius:11px}
+.inst-hero.sm b{font-size:14px}
+/* the old tiny "Download the new APK" text link is now a real button */
+.upd-apk{display:inline-flex;align-items:center;gap:8px;margin-top:14px;padding:12px 20px;border-radius:14px;font:800 14px Inter,sans-serif;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;text-decoration:none;box-shadow:0 8px 22px -12px var(--accent)}
+
+/* v23.4 lightweight: cheaper blur, no endless animations, nothing animates while the app is in the background */
+#np-bg{filter:blur(28px) saturate(1.3)!important}
+body.playing #np-art{animation:none!important}
+html.bgd *,html.bgd *::before,html.bgd *::after{animation:none!important;transition:none!important}
+@media (prefers-reduced-motion:reduce){*{animation:none!important}}
