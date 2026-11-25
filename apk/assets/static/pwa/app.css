@@ -1,4 +1,3 @@
-
 :root{--bg:#07080b;--s1:#12151c;--s2:#1a1f2b;--tx:#eef2f9;--mu:#8b95a7;--br:#3b9dff;--br2:#7c5cff;--ok:#34d399;--bad:#f87171;--ln:#232733;--ln2:#171a22;--bar:#0b0d12;--mini-bg:#161b26;--pp-bg:#eef2f9;--pp-fg:#000;--chip-on:#eef2f9;--chip-onfg:#000;--np-top:#1a2540;--shadow:rgba(0,0,0,.55);
   --sat:env(safe-area-inset-top,0px);--sab:env(safe-area-inset-bottom,0px);--tabs:54px;--mini:56px}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
