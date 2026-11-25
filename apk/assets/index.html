@@ -16,6 +16,7 @@
 <header class="top">
   <a class="brand" href="#home"><img src="/static/pwa/icon-192.png" alt="" width="30" height="30"><b>Legacy Music</b></a>
   <button class="ib" id="bell" data-a="notifs" aria-label="Announcements"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 01-3.4 0"/></svg><i class="ndot" hidden></i></button>
+  <div id="ntpop" hidden></div>
   <button class="ib" data-go="search" aria-label="Search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg></button>
   <button class="av" id="top-av" data-go="you" aria-label="Your account"></button>
 </header>
@@ -40,7 +41,11 @@
 <section id="np" hidden>
   <div id="np-bg"></div>
   <div class="np-top"><button class="ib" data-a="close-np" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button><span id="np-mode"></span><button class="ib" data-a="np-menu" aria-label="More"><svg viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></svg></button></div>
-  <img id="np-art" alt="" decoding="async">
+  <div id="np-car">
+    <div class="np-sl sp"><img id="np-art-p" alt="" decoding="async"></div>
+    <div class="np-sl sc"><img id="np-art" alt="" decoding="async"></div>
+    <div class="np-sl sn"><img id="np-art-n" alt="" decoding="async"></div>
+  </div>
   <div id="np-lyr" class="np-lyr"></div>
   <div class="np-meta-row">
     <div class="np-meta"><b id="np-t"></b><small id="np-s"></small></div>
@@ -65,6 +70,12 @@
     <button class="ib" data-a="queue" aria-label="Queue"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h9"/></svg></button>
   </div>
   <div id="np-queue" hidden></div>
+  <div id="np-pan" aria-hidden="true">
+    <button class="pan-head" data-a="np-pan-close"><span class="th" id="pan-th"></span><span class="tx"><b id="pan-t"></b><small id="pan-s"></small></span><span class="pp2"><svg viewBox="0 0 24 24" id="pan-pp"></svg></span></button>
+    <div class="pan-tabs" id="pan-tabs"><button data-a="np-tab" data-k="up" class="on">UP NEXT</button><button data-a="np-tab" data-k="lyr">LYRICS</button><button data-a="np-tab" data-k="rel">RELATED</button><i id="pan-ul"></i></div>
+    <div class="pan-body"><div id="pan-up"></div><div id="pan-lyr" hidden></div><div id="pan-rel" hidden></div></div>
+  </div>
+  <div class="np-tabs"><button data-a="np-tab" data-k="up">UP NEXT</button><button data-a="np-tab" data-k="lyr">LYRICS</button><button data-a="np-tab" data-k="rel">RELATED</button></div>
   <div id="np-lcard" class="np-card" hidden><b class="ct">Lyrics preview</b><div id="np-lines"></div><button class="pillbtn" data-a="lyrics-full">Show lyrics</button></div>
   <div id="np-acard" class="np-card ac" hidden></div>
 </section>
