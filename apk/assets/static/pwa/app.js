@@ -1445,7 +1445,7 @@ const plTickKind = p => { const c = String(p.code || '').toUpperCase(); const m 
 const plCvTick = p => { const k = plTickKind(p); return (k && TICKS[k]) ? `<img class="cvtick" src="/static/badges/${TICKS[k]}" alt="${esc(k)}">` : '' };
 const plOwnerLine = p => {
   const k = plTickKind(p), av = fixUrl(p.owner_avatar);
-  const logo = av ? `<span class="av sm" style="${bgi(av)}">${k ? `<img class="tick" src="/static/badges/${TICKS[k]}" alt="${esc(k)}">` : ''}</span>` : '';
+  const logo = av ? `<span class="av sm" style="${bgi(av)}">${(k && TICKS[k]) ? `<img class="tick" src="/static/badges/${TICKS[k]}" alt="${esc(k)}">` : ''}</span>` : '';
   if (!p.owner_name && !av) return '';
   const nameTick = (!av && k && TICKS[k]) ? `<img class="tick" src="/static/badges/${TICKS[k]}" alt="${esc(k)}">` : '';
   return `<div class="plown">${logo}${nameTick}<span class="pn">${esc(p.owner_name || '')}</span>${p.views != null ? `<span class="sub">· ${fmtViews(p.views)} views</span>` : ''}</div>`;
