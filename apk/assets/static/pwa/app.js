@@ -2168,8 +2168,7 @@ async function lgCovers() {   // mixed Punjabi songs for the login background (p
 function lgCreatorFix() {   // "Created by" logo = the owner's own logo (logged-in avatar), else static/badges/creator.png
   try {
     const im = document.querySelector('.lg-by .lg-av img'); if (!im) return;
-    const a = (S.me && S.me.avatar) ? fixUrl(S.me.avatar) : '';
-    if (a) im.src = a;
+    im.src = '/static/badges/creator.png';   // always the owner's own logo
   } catch (e) {}
 }
 function showLogin(msg) {
