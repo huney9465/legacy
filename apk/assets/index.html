@@ -10,7 +10,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <script>try{var t=localStorage.getItem('lm-theme')||'auto';document.documentElement.dataset.theme=t==='auto'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t}catch(e){}</script>
 <script>window.LM_BASE=(window.LMNative&&LMNative.base&&LMNative.base())||'';</script>
-<link rel="stylesheet" href="/static/pwa/app.css?v=22.3">
+<link rel="stylesheet" href="/static/pwa/app.css?v=23.0">
 </head>
 <body>
 <header class="top">
@@ -27,8 +27,12 @@
   <i class="bar"><i id="mini-bar"></i></i>
   <img id="mini-art" alt="">
   <div class="mt" data-a="open-np"><b id="mini-t"></b><small id="mini-s"></small></div>
-  <button class="ib" data-a="like" id="mini-like" aria-label="Add to liked"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
-  <button class="ib" data-a="toggle" aria-label="Play or pause"><svg viewBox="0 0 24 24" id="mini-pp"></svg></button>
+  <button class="ib m-like" data-a="like" id="mini-like" aria-label="Add to liked"><svg viewBox="0 0 24 24" id="mini-like-icon"></svg></button>
+  <div class="mctl">
+    <button class="ib" data-a="prev" aria-label="Previous"><svg viewBox="0 0 24 24"><path d="M18 5l-9 7 9 7zM5 5h2v14H5z"/></svg></button>
+    <button class="ib" data-a="toggle" aria-label="Play or pause"><svg viewBox="0 0 24 24" id="mini-pp"></svg></button>
+    <button class="ib" data-a="next" aria-label="Next"><svg viewBox="0 0 24 24"><path d="M6 5l9 7-9 7zM17 5h2v14h-2z"/></svg></button>
+  </div>
 </div>
 
 <nav class="tabs">
@@ -50,7 +54,7 @@
   <div class="np-meta-row">
     <div class="np-meta"><b id="np-t"></b><small id="np-s"></small></div>
     <button class="ib" data-a="np-x" aria-label="Not interested"><svg viewBox="0 0 24 24"><path d="M5 5l14 14M19 5L5 19"/></svg></button>
-    <button class="ib np-add-btn" data-a="like" id="np-like" aria-label="Add to liked"><svg viewBox="0 0 24 24" id="np-add-icon"><path d="M12 5v14M5 12h14"/></svg></button>
+    <button class="ib np-add-btn" data-a="like" id="np-like" aria-label="Add to liked"><svg viewBox="0 0 24 24" id="np-add-icon"><path class="fl" d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg></button>
   </div>
   <input id="np-seek" type="range" min="0" max="1000" value="0" aria-label="Seek">
   <div class="np-time"><span id="np-cur">0:00</span><span id="np-dur">0:00</span></div>
@@ -84,6 +88,6 @@
 <div id="upd" hidden></div>
 <div id="toast" role="status"></div>
 <audio id="au" preload="auto"></audio>
-<script src="/static/pwa/app.js?v=22.3" defer></script>
+<script src="/static/pwa/app.js?v=23.0" defer></script>
 </body>
 </html>
