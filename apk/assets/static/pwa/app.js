@@ -276,7 +276,7 @@ async function preloadNext() {
   const c = navigator.connection; if (c && c.saveData) return;
   const n = S.queue[S.qi + 1]; if (!n) return;
   const key = preKey(n); if (!key || PRE.key === key || (ytId(n) && S.dl[ytId(n)])) return;
-  if (!fullyLoaded()) return;
+  if (!fullyLoaded() && !(au.currentTime > 20 || (au.duration > 0 && au.buffered.length && au.buffered.end(au.buffered.length - 1) >= au.duration * .7))) return;
   const my = PT; PRE.busy = key; PRE.ctl = new AbortController();
   try {
     const r = await fetch(streamUrl(n), { credentials: NAT ? 'omit' : 'same-origin', signal: PRE.ctl.signal });
@@ -562,7 +562,7 @@ async function eqProbe(url) {
 let fadeM = 1, srcCors = false, corsRetried = false;
 const FADE_S = 4;   // v24: the last 4 seconds of every song fade out smoothly, then the next song starts
 { const na = document.getElementById('np-auto'); if (na) na.hidden = true }   // v24: autoplay is always on
-const VOL_PLAIN = .8;   // used when the sound chain is not possible (no CORS / old WebView): at least a softer level
+const VOL_PLAIN = .5;   // used when the sound chain is not possible (no CORS / old WebView): at least a softer level
 try { au.volume = VOL_PLAIN } catch (e) {}
 /* v24 sound: "Spotify-like" = flat, smooth, loudness-controlled (their Normal level is quieter than raw files) - warm body, soft highs,
    a limiter so nothing is sharp. Bass boost OFF = natural bass. Bass boost ON = clear punchy kick (62 Hz thump + 105 Hz body). */
@@ -590,7 +590,7 @@ function eqApply() {
     set(AX.mud.gain, pr ? -1.2 : -.4);                        // cleaner low-mids
     set(AX.pres.gain, pr ? -2.6 : -3.2);                      // softer 3-4 kHz (less sharp / tikhi)
     set(AX.hi.gain, pr ? -2.6 : -3.6);                        // softer top end
-    AX.base = on ? .64 : .8;
+    AX.base = on ? .42 : .52;
     set(AX.out.gain, AX.base * fadeM * duckM);                // overall lower level (bass boost adds energy, so a bit lower again)
     if (AX.ctx.state === 'suspended') AX.ctx.resume().catch(() => {});
   } catch (e) { try { au.volume = VOL_PLAIN * fadeM } catch (e2) {} }
@@ -605,7 +605,7 @@ const DUCK_LEVEL = .35;
 function applyGain(hard) {
   const m = fadeM * duckM;
   try {
-    if (AX) { const g = AX.out.gain, v = (AX.base || .78) * m; if (hard) { g.cancelScheduledValues(0); g.value = v } else g.setTargetAtTime(v, AX.ctx.currentTime, .06) }
+    if (AX) { const g = AX.out.gain, v = (AX.base || .5) * m; if (hard) { g.cancelScheduledValues(0); g.value = v } else g.setTargetAtTime(v, AX.ctx.currentTime, .06) }
     else au.volume = VOL_PLAIN * m;
   } catch (e) {}
 }
@@ -803,6 +803,70 @@ const skel = n => '<div class="sk"></div>'.repeat(n);
 /* Sheets own a history entry, so the phone's back button closes the sheet instead of leaving the page.
    closeSheet() pops that entry (async) - run anything that navigates afterwards through afterSheet(). */
 let skipPop = 0, afterPop = [];
+
+/* ── v24.1: own dialogs / photo picker / cropper (the Android WebView ignores confirm() = Delete did nothing) ── */
+function askYes(msg, yes) {
+  return new Promise(res => {
+    const w = document.createElement('div'); w.className = 'ask-wrap';
+    w.innerHTML = `<div class="ask-box"><p>${esc(msg)}</p><div class="actions"><button class="btn bad" data-y>${esc(yes || 'Yes')}</button><button class="btn ghost" data-n>Cancel</button></div></div>`;
+    const done = v => { w.remove(); res(v) };
+    w.querySelector('[data-y]').onclick = () => done(true); w.querySelector('[data-n]').onclick = () => done(false);
+    w.addEventListener('click', e => { if (e.target === w) done(false) });
+    document.body.appendChild(w);
+  });
+}
+function noPickerSheet() {
+  sheet(`<h3>Photo picker not available</h3><p class="sub">This app version cannot open your gallery yet. Open Legacy Music in your phone browser (same account) to upload photos.</p>
+    <div class="actions"><button class="btn" data-a="open-web">Open in browser</button><button class="btn ghost" data-a="close-sheet">Close</button></div>`);
+}
+function pickFile(inp) {   // opens the gallery; inside the APK, if nothing opened (old APK without a file chooser) tell the user what to do
+  let opened = false; const mark = () => { opened = true };
+  window.addEventListener('blur', mark, { once: true }); document.addEventListener('visibilitychange', mark, { once: true });
+  inp.click();
+  if (NAT) setTimeout(() => { window.removeEventListener('blur', mark); document.removeEventListener('visibilitychange', mark); if (!opened && !document.hidden) noPickerSheet() }, 2200);
+}
+const dataBlob = d => { const b = atob(d.split(',')[1]), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return new Blob([u], { type: 'image/jpeg' }) };
+/* photo adjuster: drag to move, pinch / slider / mouse wheel to zoom, rotate. Returns a JPEG data-uri (or null if cancelled) */
+function cropImage(file, aw, ah, ow, oh, round) {
+  return new Promise(resolve => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onerror = () => { URL.revokeObjectURL(url); toast('That file is not a picture'); resolve(null) };
+    img.onload = () => {
+      const SW = Math.min(window.innerWidth - 44, 340), SH = Math.round(SW * ah / aw);
+      const w = document.createElement('div'); w.className = 'cr-wrap';
+      w.innerHTML = `<div class="cr-box"><h3>Adjust photo</h3><p class="sub">Drag to move · pinch or use the slider to zoom</p>
+        <div class="cr-stage${round ? ' round' : ''}" style="width:${SW}px;height:${SH}px"><canvas width="${SW * 2}" height="${SH * 2}" style="width:${SW}px;height:${SH}px"></canvas></div>
+        <div class="cr-zoom"><span>−</span><input type="range" min="1" max="4" step="0.01" value="1" aria-label="Zoom"><span>+</span></div>
+        <div class="cr-row"><button class="btn sm ghost" data-rot type="button">↻ Rotate</button><button class="btn sm ghost" data-rst type="button">Reset</button></div>
+        <div class="actions"><button class="btn" data-ok type="button">Done</button><button class="btn ghost" data-no type="button">Cancel</button></div></div>`;
+      document.body.appendChild(w);
+      const cv = w.querySelector('canvas'), ctx = cv.getContext('2d'), st = w.querySelector('.cr-stage'), rg = w.querySelector('input[type=range]');
+      let rot = 0, z = 1, cx = 0, cy = 0;
+      const dims = () => { const sw = rot % 2 ? img.naturalHeight : img.naturalWidth, sh = rot % 2 ? img.naturalWidth : img.naturalHeight, base = Math.max(SW / sw, SH / sh); return { base, dw: sw * base * z, dh: sh * base * z } };
+      const clamp = () => { const d = dims(), mx = Math.max(0, (d.dw - SW) / 2), my = Math.max(0, (d.dh - SH) / 2); cx = Math.max(-mx, Math.min(mx, cx)); cy = Math.max(-my, Math.min(my, cy)) };
+      const draw = (c, W, H) => { const k = W / SW, d = dims(); c.fillStyle = '#000'; c.fillRect(0, 0, W, H); c.save(); c.translate(W / 2 + cx * k, H / 2 + cy * k); c.rotate(rot * Math.PI / 2); c.scale(d.base * z * k, d.base * z * k); c.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2); c.restore() };
+      const paint = () => { clamp(); draw(ctx, cv.width, cv.height); rg.value = z };
+      const ptr = new Map(); let last = 0;
+      st.addEventListener('pointerdown', e => { st.setPointerCapture(e.pointerId); ptr.set(e.pointerId, [e.clientX, e.clientY]); last = 0 });
+      st.addEventListener('pointermove', e => {
+        if (!ptr.has(e.pointerId)) return; const o = ptr.get(e.pointerId); ptr.set(e.pointerId, [e.clientX, e.clientY]);
+        if (ptr.size === 1) { cx += e.clientX - o[0]; cy += e.clientY - o[1] }
+        else if (ptr.size === 2) { const [a, b] = [...ptr.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]); if (last) z = Math.max(1, Math.min(4, z * d / last)); last = d }
+        paint();
+      });
+      const up = e => { ptr.delete(e.pointerId); last = 0 }; st.addEventListener('pointerup', up); st.addEventListener('pointercancel', up);
+      st.addEventListener('wheel', e => { e.preventDefault(); z = Math.max(1, Math.min(4, z * (e.deltaY < 0 ? 1.06 : 0.94))); paint() }, { passive: false });
+      rg.addEventListener('input', () => { z = +rg.value; paint() });
+      w.querySelector('[data-rot]').onclick = () => { rot = (rot + 1) % 4; cx = cy = 0; paint() };
+      w.querySelector('[data-rst]').onclick = () => { rot = 0; z = 1; cx = cy = 0; paint() };
+      const end = v => { URL.revokeObjectURL(url); w.remove(); resolve(v) };
+      w.querySelector('[data-no]').onclick = () => end(null);
+      w.querySelector('[data-ok]').onclick = () => { const o = document.createElement('canvas'); o.width = ow; o.height = oh; draw(o.getContext('2d'), ow, oh); end(o.toDataURL('image/jpeg', .86)) };
+      paint();
+    };
+    img.src = url;
+  });
+}
 function sheet(html) {
   $('#sheet-box').innerHTML = html; $('#sheet').hidden = false;
   if (!(history.state && history.state.sh)) { try { history.pushState({ sh: 1 }, '') } catch (e) {} }
@@ -1183,7 +1247,7 @@ async function plArtSave(code, kind, body) {
 const plArtFile = (() => { const i = document.createElement('input'); i.type = 'file'; i.accept = 'image/*'; i.hidden = true; document.body.appendChild(i); return i })();
 plArtFile.addEventListener('change', async () => {
   const f = plArtFile.files && plArtFile.files[0]; plArtFile.value = ''; if (!f) return;
-  try { const data = await imgResize(f, PA.kind === 'bg' ? 1080 : 640, PA.kind === 'bg' ? 540 : 640, .82); await plArtSave(PA.code, PA.kind, { data }) } catch (er) { toast(er.message) }
+  try { const bgk = PA.kind === 'bg', data = await cropImage(f, bgk ? 2 : 1, 1, bgk ? 1080 : 640, bgk ? 540 : 640); if (data) await plArtSave(PA.code, PA.kind, { data }) } catch (er) { toast(er.message) }
 });
 // Playlist cover / background: upload from the phone gallery only (no link box).
 function plArtSheet(code, kind) {
@@ -1250,7 +1314,7 @@ async function artistPage(name) {
 
 const statsBox = st => `<h2>Your stats</h2><div class="statgrid"><div><b>${st.plays_week || 0}</b><span>Plays this week</span></div><div><b>${st.plays_total || 0}</b><span>Plays in total</span></div><div><b>${st.likes || 0}</b><span>Liked songs</span></div><div><b>${st.downloads || 0}</b><span>Downloads</span></div></div>${st.top_artist ? `<p class="sub" style="margin-top:8px">Your top artist: <b>${esc(st.top_artist)}</b></p>` : ''}`;
 async function you() {
-  const m = S.me, role = S.cfg.role, th = store.get('lm-theme') || 'auto', fa = artistsGet(), canEdit = !!S.prof && !S.offline;
+  const m = S.me, role = S.cfg.role, th = store.get('lm-theme') || 'auto', fa = artistsGet(), canEdit = !S.offline;
   let est = ''; try { const e = await navigator.storage.estimate(); est = ' · ' + Math.round((e.usage || 0) / 1048576) + ' MB used' } catch (e) {}
   view.innerHTML = installHero('sm') + `<div class="box" style="display:flex;gap:14px;align-items:center"><span class="av" style="width:64px;height:64px;${bgi(m.avatar)}"${canEdit ? ' data-a="edit-profile"' : ''}>${tick(role)}</span><div style="flex:1;min-width:0"><h3 class="nm">${tick(role)}${esc(m.username)}</h3><span class="sub">${S.prof && S.prof.username ? '@' + esc(S.prof.username) + ' · ' : ''}${roleName(role)} · ${prov()} login</span></div>${canEdit ? '<button class="btn sm ghost" data-a="edit-profile">Edit</button>' : ''}</div>
   <div class="box prem"><h3>${ic('crown', 'gold')} Premium</h3>${isPrem() ? '<span class="sub">You have Premium. Thank you!</span><div id="prem-exp" class="sub"></div>' : '<span class="sub">Create playlists, collaborative playlists, download songs and get the Premium tick.</span>'}
@@ -1398,16 +1462,9 @@ async function requestGalleryPermission() { return true }
 pfFile.addEventListener('change', async () => {
   const f = pfFile.files && pfFile.files[0]; pfFile.value = ''; if (!f) return;
   try {
-    // FIX: Resize and also allow pinch-zoom via the preview element (data-uri stored in PF)
-    const data = await imgResize(f, pfKind === 'bg' ? 1080 : 640, pfKind === 'bg' ? 540 : 640, .82);
-    PF[pfKind] = data; PF[pfKind === 'bg' ? 'rmBg' : 'rmCover'] = false;
-    const el = $('#pf-' + pfKind);
-    if (el) {
-      el.style.backgroundImage = `url('${data}')`;
-      el.classList.add('has');
-      // FIX: Enable pinch-to-zoom / drag-to-reposition on the preview
-      pfEnablePinchZoom(el, pfKind);
-    }
+    const bgk = pfKind === 'bg', data = await cropImage(f, bgk ? 2 : 1, 1, bgk ? 1080 : 640, bgk ? 540 : 640); if (!data) return;
+    PF[pfKind] = data; PF[bgk ? 'rmBg' : 'rmCover'] = false;
+    const el = $('#pf-' + pfKind); if (el) { el.style.backgroundImage = `url('${data}')`; el.classList.add('has') }
   } catch (er) { toast(er.message) }
 });
 
@@ -1442,13 +1499,14 @@ async function plForm(kind, code) {
   view.innerHTML = `<button class="btn sm ghost" data-a="pf-back" style="margin:2px 0 8px">‹ Back</button>
     <h1>${edit ? 'Edit playlist' : collab ? 'New collaborative playlist' : 'New playlist'}</h1>
     ${collab ? '<p class="sub">Friends with the invite link can add songs. Collaborative playlists are public while you have Premium.</p>' : ''}
-    <label class="pf-l">Name</label><input id="pf-name" maxlength="60" placeholder="Playlist name" autocomplete="off" value="${esc(meta.name || '')}">
+    <div class="pf-namebox"><span class="pf-nico">${ic('music')}</span><div class="pf-nin"><label for="pf-name">Playlist name</label><input id="pf-name" maxlength="60" placeholder="Give your playlist a name" autocomplete="off" value="${esc(meta.name || '')}"></div><span class="pf-cnt" id="pf-cnt">0/60</span></div>
     <label class="pf-l">Cover photo</label>
     <div class="pf-pick"><span id="pf-cover" class="pf-prev sq${cv || m.cover ? ' has' : ''}" data-plcode="${esc(code || '')}" style="${cv ? bgi(cv) : ''}"></span><div><button class="btn sm ghost" data-a="pf-pick" data-kind="cover">${ic('edit')} Upload photo</button>${edit && (m.cover || cv) ? `<button class="btn sm ghost" data-a="pf-rm" data-kind="cover">Remove</button>` : ''}</div></div>
     <label class="pf-l">Background</label>
     <div class="pf-pick"><span id="pf-bg" class="pf-prev wide${bn || m.bg ? ' has' : ''}" data-plcode="${esc(code || '')}" data-plkind="bg" style="${bn ? bgi(bn) : ''}"></span><div><button class="btn sm ghost" data-a="pf-pick" data-kind="bg">${ic('edit')} Upload photo</button>${edit && (m.bg || bn) ? `<button class="btn sm ghost" data-a="pf-rm" data-kind="bg">Remove</button>` : ''}</div></div>
     <div class="actions" style="margin-top:18px"><button class="btn" data-a="pf-save" data-mode="${kind}" data-pid="${esc(meta.id || '')}" data-code="${esc(code || '')}">${edit ? 'Save changes' : 'Create playlist'}</button><button class="btn ghost" data-a="pf-back">Cancel</button></div>
     ${edit && meta.is_owner ? `<div class="box danger"><h3>Delete playlist</h3><span class="sub">This removes the playlist for good.</span>${meta.views != null ? `<div class="sub">👁 ${fmtViews(meta.views)} views</div>` : ''}<div class="actions"><button class="btn bad" data-a="pf-del" data-pid="${esc(meta.id || '')}" data-code="${esc(code)}">Delete playlist</button></div></div>` : ''}`;
+  { const ni = $('#pf-name'), cn = $('#pf-cnt'); if (ni && cn) { const u = () => { cn.textContent = ni.value.length + '/60' }; ni.addEventListener('input', u); u() } }
   if (!edit) setTimeout(() => { const n = $('#pf-name'); n && n.focus() }, 60);
 }
 async function pfSave(el) {
@@ -1863,7 +1921,7 @@ document.addEventListener('click', async e => {
   else if (a === 'dl') { if (S.cur) { const id = ytId(S.cur); if (id && S.dl[id]) { await dlRemove(id); toast('Download removed'); ui() } else dlSong(S.cur) } }
   else if (a === 'dl-rm') { closeSheet(); await dlRemove(el.dataset.id); toast('Download removed'); if (location.hash.startsWith('#downloads')) route(); else ui() }
   else if (a === 'dl-play') { if (L.dl && L.dl.length) playFrom(L.dl, 0, true, false) }
-  else if (a === 'dl-clear') { if (confirm('Delete all downloaded songs from this phone?')) { for (const x of (await dlMeta())) await dlRemove(x.id); toast('Downloads deleted'); route() } }
+  else if (a === 'dl-clear') { if (await askYes('Delete all downloaded songs from this phone?', 'Delete')) { for (const x of (await dlMeta())) await dlRemove(x.id); toast('Downloads deleted'); route() } }
   else if (a === 'open-dl') location.hash = '#downloads';
   else if (a === 'pl-dl') {
     if (!isPrem()) return premiumSheet('Downloading songs to listen offline is a Premium feature.');
@@ -1936,7 +1994,7 @@ document.addEventListener('click', async e => {
   else if (a === 'pl-shuffle') { const s = (L.pl || []).slice().sort(() => Math.random() - .5); playFrom(s, 0, true, true); S.ctx = '' }
   else if (a === 'pl-edit') { location.hash = '#pledit/' + el.dataset.code }
   else if (a === 'pl-art-open') plArtSheet(el.dataset.code, el.dataset.kind);
-  else if (a === 'pl-art-pick') { PA.kind = el.dataset.kind; PA.code = el.dataset.code; requestGalleryPermission().then(() => plArtFile.click()) }
+  else if (a === 'pl-art-pick') { PA.kind = el.dataset.kind; PA.code = el.dataset.code; requestGalleryPermission().then(() => pickFile(plArtFile)) }
   else if (a === 'pl-art-rm') {
     try { await api(`/api/app/pl-art/${encodeURIComponent(el.dataset.code)}/${el.dataset.kind}`, { method: 'DELETE' }); if (PA.map[el.dataset.code]) delete PA.map[el.dataset.code][el.dataset.kind]; closeSheet(); toast('Removed'); playlist(el.dataset.code) }
     catch (er) { toast(er.message) }
@@ -1957,11 +2015,11 @@ document.addEventListener('click', async e => {
   else if (a === 'clear-rq') { store.set('lm-rq', '[]'); search() }
   else if (a === 'new-pl') { if (!isPrem()) return premiumSheet('Creating your own playlists is a Premium feature.'); location.hash = '#plnew' }
   else if (a === 'new-collab-pl') { if (!isPrem()) return premiumSheet('Collaborative playlists are a Premium feature.'); location.hash = '#plcollab' }
-  else if (a === 'pf-pick') { pfKind = el.dataset.kind; requestGalleryPermission().then(() => pfFile.click()) }  // FIX: requests gallery permission on Android first
+  else if (a === 'pf-pick') { pfKind = el.dataset.kind; requestGalleryPermission().then(() => pickFile(pfFile)) }  // FIX: requests gallery permission on Android first
   else if (a === 'pf-back') { history.back() }
   else if (a === 'pf-rm') { const k = el.dataset.kind; PF[k] = null; PF[k === 'bg' ? 'rmBg' : 'rmCover'] = true; const e2 = $('#pf-' + k); if (e2) { e2.style.backgroundImage = ''; e2.classList.remove('has') } }
   else if (a === 'pf-save') pfSave(el);
-  else if (a === 'pf-del') { if (!confirm('Delete this playlist for good?')) return; try { await api('/api/playlists/' + el.dataset.pid, { method: 'DELETE' }); ev('pl_delete', { code: el.dataset.code }); toast('Playlist deleted'); location.hash = '#library' } catch (er) { toast(er.message) } }
+  else if (a === 'pf-del') { if (!(await askYes('Delete this playlist for good?', 'Delete'))) return; try { await api('/api/playlists/' + el.dataset.pid, { method: 'DELETE' }); ev('pl_delete', { code: el.dataset.code }); toast('Playlist deleted'); location.hash = '#library' } catch (er) { toast(er.message) } }
   else if (a === 'collab-link') { copyText(plLink(el.dataset.code), 'Copied') }
   else if (a === 'pl-copy') { sharePl(el.dataset.code, (L.plMeta && L.plMeta.name) || '') }
   else if (a === 'plm-share') { closeSheet(); sharePl(el.dataset.code, el.dataset.name) }
@@ -1977,7 +2035,7 @@ document.addEventListener('click', async e => {
     closeSheet(); if (!isPrem()) return premiumSheet('Downloading songs to listen offline is a Premium feature.');
     try { const l = (await plTracks(el.dataset.code)).filter(x => ytId(x) && !S.dl[ytId(x)]); if (!l.length) return toast('Everything here is already downloaded'); let n = 0; for (const t of l) { toast(`Downloading ${++n}/${l.length}…`); if (!(await dlSong(t, true))) break } toast('Playlist downloaded') } catch (er) { toast(er.message) }
   }
-  else if (a === 'plm-del') { closeSheet(); if (!confirm('Delete this playlist for good?')) return; try { await api('/api/playlists/' + el.dataset.pid, { method: 'DELETE' }); ev('pl_delete', { code: el.dataset.code }); toast('Playlist deleted'); route() } catch (er) { toast(er.message) } }
+  else if (a === 'plm-del') { closeSheet(); if (!(await askYes('Delete this playlist for good?', 'Delete'))) return; try { await api('/api/playlists/' + el.dataset.pid, { method: 'DELETE' }); ev('pl_delete', { code: el.dataset.code }); toast('Playlist deleted'); route() } catch (er) { toast(er.message) } }
   else if (a === 'plm-unsave') { closeSheet(); const c = String(el.dataset.code).toUpperCase(); try { await api('/api/app/saved/' + encodeURIComponent(c), { method: 'DELETE' }); S.saved.delete(c); toast('Removed from your library'); route() } catch (er) { toast(er.message) } }
   else if (a === 'np-x') { hideSong(S.cur); act.next() }
   else if (a === 'np-menu' && S.cur) { const i0 = L.np = [S.cur]; sheet(`<h3>${esc(S.cur.title)}</h3><span class="sub">${esc(S.cur.author)}</span><div class="menu"><button data-a="like">${ic('plus')} ${S.liked[S.cur.uri] ? 'Remove from Liked' : 'Add to Liked'}</button><button data-a="add-to-pl" data-l="np" data-i="0">${ic('music')} Add to playlist ${isPrem() ? '' : ic('crown', 'gold')}</button><button data-a="more-by" data-q="${esc(S.cur.author)}">${ic('radio')} Song radio</button><button data-a="open-artist" data-name="${esc(S.cur.author)}">${ic('person')} Artist</button><button data-a="copy-cur">${ic('copy')} Copy</button></div>`) }
@@ -1999,6 +2057,7 @@ document.addEventListener('click', async e => {
   else if (a === 'set-haptic') { S.haptic = !S.haptic; store.set('lm-haptic', S.haptic ? '1' : '0'); el.querySelector('.sw').classList.toggle('on', S.haptic); buzz() }
   else if (a === 'chk-upd') checkUpdate(true);
   else if (a === 'edit-profile') editProfile();
+  else if (a === 'open-web') { const u = (NAT || location.origin) + '/app'; if (bridge && bridge.open) bridge.open(u); else window.open(u, '_blank') }
   else if (a === 'ep-pick') pfPick(() => { const x = $('#ep-av'); if (x) x.setAttribute('style', pfAv()); if (location.hash === '#you') you() });
   else if (a === 'ep-reset') { try { applyProfile(await api('/api/app/profile/avatar', { method: 'DELETE' })); refreshTopAv(); const x = $('#ep-av'); if (x) x.setAttribute('style', pfAv()); toast('Photo removed'); if (location.hash === '#you') you() } catch (er) { toast(er.message) } }
   else if (a === 'ep-save') epSave();
@@ -2022,7 +2081,7 @@ document.addEventListener('click', async e => {
   else if (a === 'adm-pl') admPlSheet(el.dataset.code);
   else if (a === 'adm-grant') { try { await api('/api/app/admin/grant', { method: 'POST', body: { user_id: el.dataset.uid, kind: el.dataset.kind, action: el.dataset.act, days: +el.dataset.days || 0 } }); closeSheet(); toast('Done'); buzz(); adminPage('users') } catch (er) { toast(er.message || 'Failed') } }
   else if (a === 'adm-tick') { try { await api('/api/app/admin/pl-tick', { method: 'POST', body: { code: el.dataset.code, tick: el.dataset.tick } }); PTK.map[el.dataset.code] = el.dataset.tick; closeSheet(); toast('Tick updated'); adminPage('playlists') } catch (er) { toast(er.message || 'Failed') } }
-  else if (a === 'adm-pl-del') { if (!confirm('Delete this playlist?')) return; try { await api('/api/app/admin/playlist/' + encodeURIComponent(el.dataset.code), { method: 'DELETE' }); closeSheet(); toast('Deleted'); adminPage('playlists') } catch (er) { toast(er.message || 'Failed') } }
+  else if (a === 'adm-pl-del') { if (!(await askYes('Delete this playlist?', 'Delete'))) return; try { await api('/api/app/admin/playlist/' + encodeURIComponent(el.dataset.code), { method: 'DELETE' }); closeSheet(); toast('Deleted'); adminPage('playlists') } catch (er) { toast(er.message || 'Failed') } }
   else if (a === 'an-type') { ADM.anOpts = anOptsRead(); ADM.anType = el.dataset.k; document.querySelectorAll('#an-type button').forEach(b => b.classList.toggle('on', b.dataset.k === ADM.anType)); const o = $('#an-opts'); if (o) o.hidden = ADM.anType === 'announcement' }
   else if (a === 'an-dur') { ADM.anDur = el.dataset.v; document.querySelectorAll('#an-dur button').forEach(b => b.classList.toggle('on', b.dataset.v === ADM.anDur)) }
   else if (a === 'an-em') { ADM.anEmoji = el.dataset.k; document.querySelectorAll('#an-em-row button[data-a="an-em"]').forEach(b => b.classList.toggle('on', b.dataset.k === ADM.anEmoji)) }
@@ -2244,6 +2303,13 @@ async function pfResize(file) {   // centre-crop to a 256x256 JPEG on the phone 
     return await new Promise(r => c.toBlob(r, 'image/jpeg', .86));
   } finally { URL.revokeObjectURL(url) }
 }
+async function pfUploadBlob(blob) {
+  const fd = new FormData(); fd.append('file', blob, 'avatar.jpg');
+  const r = await ff('/api/app/profile/avatar', { method: 'POST', body: fd, headers: TOK ? {} : { 'X-LM-Platform': 'pwa' } });
+  let j = null; try { j = await r.json() } catch (e) {}
+  if (!r.ok) throw new Error((j && j.detail) || 'Upload failed (' + r.status + ')');
+  return j;
+}
 async function pfUpload(file) {
   const blob = await pfResize(file); if (!blob) throw new Error('Could not read the picture');
   const fd = new FormData(); fd.append('file', blob, 'avatar.jpg');
@@ -2254,8 +2320,8 @@ async function pfUpload(file) {
 }
 function pfPick(done) {
   const f = document.createElement('input'); f.type = 'file'; f.accept = 'image/*';
-  f.onchange = async () => { const file = f.files && f.files[0]; if (!file) return; try { toast('Uploading…'); const p = await pfUpload(file); applyProfile(p); refreshTopAv(); toast('Photo updated'); done && done(p) } catch (e) { toast(e.message) } };
-  f.click();
+  f.onchange = async () => { const file = f.files && f.files[0]; if (!file) return; try { const d = await cropImage(file, 1, 1, 256, 256, true); if (!d) return; toast('Uploading…'); const p = await pfUploadBlob(dataBlob(d)); applyProfile(p); refreshTopAv(); toast('Photo updated'); done && done(p) } catch (e) { toast(e.message) } };
+  pickFile(f);
 }
 function unameWatch(inp, st, cb, same) {   // live "is this username free?" check
   let t = 0, seq = 0;
@@ -2291,23 +2357,25 @@ function usernameSetup() {      // first Google login: must choose a username be
     };
   });
 }
-function editProfile() {
-  const p = S.prof || {};
+async function editProfile() {
+  if (!S.prof) { try { S.prof = await api('/api/app/profile') } catch (e) { return toast('Update the server (profile_api.py) to edit your profile') } }
+  const p = S.prof, dc = p.provider === 'discord';
   sheet(`<h3>Edit profile</h3>
-    <div class="pf-top"><button class="us-av" data-a="ep-pick" type="button" id="ep-av" style="${pfAv()}"><i>${PF_CAM}</i></button>
-      <div class="pf-btns"><button class="btn sm ghost" data-a="ep-pick">Change photo</button><button class="btn sm ghost" data-a="ep-reset">Remove photo</button></div></div>
+    ${dc ? `<div class="pf-top"><span class="us-av" style="${pfAv()}"></span><div class="pf-btns"><span class="sub">Discord login: you can change the name shown in the app. Your username stays the same.</span></div></div>`
+      : `<div class="pf-top"><button class="us-av" data-a="ep-pick" type="button" id="ep-av" style="${pfAv()}"><i>${PF_CAM}</i></button>
+      <div class="pf-btns"><button class="btn sm ghost" data-a="ep-pick">Change photo</button><button class="btn sm ghost" data-a="ep-reset">Remove photo</button></div></div>`}
     <label class="pf-l">Name <small>main name, shown in the app</small></label><input class="pf-in" id="ep-name" maxlength="32" autocomplete="off" value="${esc(p.display_name || '')}">
-    <label class="pf-l">Username <small>unique, a-z 0-9 _ .</small></label><input class="pf-in" id="ep-u" maxlength="20" autocapitalize="none" autocomplete="off" spellcheck="false" value="${esc(p.username || '')}">
-    <div class="us-st" id="ep-st"></div>
+    ${dc ? `<label class="pf-l">Username <small>from Discord - cannot be changed</small></label><input class="pf-in" id="ep-ud" value="@${esc(p.username || '')}" disabled>`
+      : `<label class="pf-l">Username <small>unique, a-z 0-9 _ .</small></label><input class="pf-in" id="ep-u" maxlength="20" autocapitalize="none" autocomplete="off" spellcheck="false" value="${esc(p.username || '')}">
+    <div class="us-st" id="ep-st"></div>`}
     <div class="actions"><button class="btn" data-a="ep-save">Save</button></div>`);
-  let ok = true; const u = $('#ep-u'); u.dataset.ok = '1';
-  unameWatch(u, $('#ep-st'), v => { u.dataset.ok = v ? '1' : '' }, p.username || '');
+  const u = $('#ep-u'); if (u) { u.dataset.ok = '1'; unameWatch(u, $('#ep-st'), v => { u.dataset.ok = v ? '1' : '' }, p.username || '') }
 }
 async function epSave() {
-  const p = S.prof || {}, nm = $('#ep-name'), u = $('#ep-u'); if (!nm || !u) return;
-  const body = {}, name = nm.value.trim(), un = u.value.trim().toLowerCase();
+  const p = S.prof || {}, nm = $('#ep-name'), u = $('#ep-u'); if (!nm) return;
+  const body = {}, name = nm.value.trim();
   if (!name) return toast('Enter a name');
-  if (un !== (p.username || '')) { if (!u.dataset.ok) return toast('Pick a username that is available'); body.username = un }
+  if (u) { const un = u.value.trim().toLowerCase(); if (un !== (p.username || '')) { if (!u.dataset.ok) return toast('Pick a username that is available'); body.username = un } }
   if (name !== p.display_name) body.display_name = name;
   if (!Object.keys(body).length) { closeSheet(); return }
   try { const r = await api('/api/app/profile', { method: 'POST', body }); applyProfile(r); refreshTopAv(); closeSheet(); toast('Profile saved'); if (location.hash === '#you') you() }
