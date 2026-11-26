@@ -1,4 +1,4 @@
-/* Legacy Music app (v22.3). Installed app = plays in the phone. Website = plays in the Discord voice channel.
+/* Legacy Music app (v23.3). Installed app = plays in the phone. Website = plays in the Discord voice channel.
    v20: previous button, autoplay, lock-screen / notification-shade controls (Media Session), offline downloads (Premium),
         saved playlists, themes (Auto / Dark / White / AMOLED), update checker, sleep timer, repeat / shuffle, smarter search.
    v21: recently played row (songs + playlists), collaborative playlists (Premium, invite-link based),
@@ -16,7 +16,7 @@
    NOTE: bump CV below together with APP_VERSION in pwa.py on every release. */
 (() => {
 'use strict';
-const CV = '22.3';
+const CV = '23.3';
 /* APK mode: the Android app bundles these files and talks to the server over HTTPS with a token (window.LM_BASE is set by its index.html).
    On the website / installed PWA LM_BASE is empty and everything works exactly as before (cookie login, same origin). */
 const NAT = (typeof window.LM_BASE === 'string' && window.LM_BASE) ? window.LM_BASE.replace(/\/$/, '') : '';
@@ -122,24 +122,60 @@ async function api(p, o = {}) {
 const idb = () => new Promise((res, rej) => { const r = indexedDB.open('lm-offline', 1); r.onupgradeneeded = () => { r.result.createObjectStore('songs', { keyPath: 'id' }); r.result.createObjectStore('meta', { keyPath: 'id' }) }; r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error) });
 const idbTx = async (store_, mode_, fn) => { const d = await idb(); return new Promise((res, rej) => { const tx = d.transaction(store_, mode_), rq = fn(tx.objectStore(store_)); tx.oncomplete = () => res(rq && rq.result); tx.onerror = () => rej(tx.error) }) };
 const dlMeta = () => idbTx('meta', 'readonly', s => s.getAll()).catch(() => []);
+
+/* v24.2: per-song download ring (fills while downloading) -> tick when done; downloaded playlists list */
+const DLP = {};   // song id -> percent while it downloads (-1 = size unknown, spins)
+const DL_TICK = '<svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg>';
+const dlMark = id => !id ? '' : S.dl[id] ? `<span class="dl-ok">${DL_TICK}</span>` : (id in DLP ? `<span class="dl-ring${DLP[id] < 0 ? ' ind' : ''}" style="--p:${Math.max(0, DLP[id])}"></span>` : '');
+const dlSlot = id => { try { document.querySelectorAll('.dl-slot').forEach(s => { if (s.dataset.dlid === id) s.innerHTML = dlMark(id) }) } catch (e) {} };
+const dlProg = (id, p) => { DLP[id] = p; try { document.querySelectorAll('.dl-slot').forEach(s => { if (s.dataset.dlid !== id) return; const r = s.firstElementChild; if (r && r.classList.contains('dl-ring')) { r.classList.toggle('ind', p < 0); r.style.setProperty('--p', Math.max(0, p)) } else s.innerHTML = dlMark(id) }) } catch (e) {} };
+async function dlRead(r, id) {
+  let tot = 0; try { tot = +r.headers.get('content-length') || 0 } catch (e) {}
+  if (!r.body || !r.body.getReader) return r.blob();
+  const rd = r.body.getReader(), parts = []; let got = 0, ty = ''; try { ty = r.headers.get('content-type') || '' } catch (e) {}
+  for (;;) { const { done, value } = await rd.read(); if (done) break; parts.push(value); got += value.length; dlProg(id, tot ? Math.min(99, Math.round(got * 100 / tot)) : -1) }
+  return new Blob(parts, ty ? { type: ty } : {});
+}
+const dlPlGet = () => { const a = jget('lm-dlpl', []); return Array.isArray(a) ? a : [] };
+const dlPlKey = c => c === 'liked' ? 'liked' : String(c || '').toUpperCase();
+const dlPlHas = c => { const k = dlPlKey(c); return dlPlGet().find(x => x.code === k) };
+const dlPlDone = list => { const ids = (list || []).map(ytId).filter(Boolean); return !!ids.length && ids.every(i => S.dl[i]) };
+function dlPlSave(code, name, cover, tracks) {
+  const k = dlPlKey(code), ids = (tracks || []).map(ytId).filter(Boolean);
+  const a = dlPlGet().filter(x => x.code !== k); a.unshift({ code: k, name: name || k, cover: cover || '', ids, ts: Date.now() });
+  store.set('lm-dlpl', JSON.stringify(a.slice(0, 200)));
+}
+async function dlPlaylist(code, name, cover, tracks) {
+  if (!isPrem()) return premiumSheet('Downloading songs to listen offline is a Premium feature.');
+  const all = (tracks || []).filter(x => ytId(x)); if (!all.length) return toast('No downloadable songs here');
+  const todo = all.filter(x => !S.dl[ytId(x)]);
+  if (!todo.length) { dlPlSave(code, name, cover, all); toast('Everything here is already downloaded'); return true }
+  let n = 0; for (const t of todo) { toast(`Downloading ${++n}/${todo.length}…`); if (!(await dlSong(t, true))) break }
+  if (all.every(x => S.dl[ytId(x)])) { dlPlSave(code, name, cover, all); toast('Playlist downloaded'); buzz(); return true }
+  toast('Download stopped. Try again to finish the playlist'); return false;
+}
+async function dlPlOffline(rec) {
+  const m = await dlMeta(), by = {}; m.forEach(x => { by[x.id] = x });
+  return { name: rec.name, code: rec.code, cover_image_url: rec.cover || '', is_owner: false, tracks: rec.ids.map(i => by[i]).filter(Boolean).map(x => ({ title: x.title, author: x.author, thumbnail: x.thumbnail, uri: x.uri, identifier: x.id, duration: x.duration })) };
+}
 async function dlSong(t, quiet) {
   const id = ytId(t); if (!id) { if (!quiet) toast("This song can't be downloaded"); return false }
   if (S.dl[id]) { if (!quiet) toast('Already downloaded'); return true }
   if (!isPrem()) { premiumSheet('Downloading songs to listen offline is a Premium feature.'); return false }
   if (!navigator.onLine) { toast("You're offline"); return false }
-  const b = $('#np-dl'); b && b.classList.add('busy'); if (!quiet) toast('Downloading…');
+  const b = $('#np-dl'); b && b.classList.add('busy'); if (!quiet) toast('Downloading…'); dlProg(id, 0);
   try {
     const r = await ff(`/api/app/stream?v=${id}&dl=1&av=${CV}`);
     if (r.status === 426) { showUpdate({ update_required: true }); return false }
     if (r.status === 403) { premiumSheet('Downloading songs to listen offline is a Premium feature.'); return false }
     if (!r.ok) throw new Error("Couldn't download this song");
-    const blob = await r.blob();
+    const blob = await dlRead(r, id);
     await idbTx('songs', 'readwrite', s => s.put({ id, blob }));
     await idbTx('meta', 'readwrite', s => s.put({ id, title: t.title, author: t.author, thumbnail: art(t), duration: t.duration, size: blob.size, ts: Date.now(), uri: t.uri || `https://www.youtube.com/watch?v=${id}` }));
-    S.dl[id] = 1; ev('download', { ref: t.uri || id, title: t.title, author: t.author }); if (!quiet) toast('Downloaded · plays offline'); buzz(); try { navigator.storage && navigator.storage.persist && navigator.storage.persist() } catch (e) {}
+    delete DLP[id]; S.dl[id] = 1; dlSlot(id); ev('download', { ref: t.uri || id, title: t.title, author: t.author }); if (!quiet) toast('Downloaded · plays offline'); buzz(); try { navigator.storage && navigator.storage.persist && navigator.storage.persist() } catch (e) {}
     return true;
   } catch (e) { if (!quiet) toast(e.message || 'Download failed'); return false }
-  finally { b && b.classList.remove('busy'); ui() }
+  finally { b && b.classList.remove('busy'); if (id in DLP) { delete DLP[id]; dlSlot(id) } ui() }
 }
 async function dlRemove(id) { ev('dl_rm', { ref: id }); await idbTx('songs', 'readwrite', s => s.delete(id)); await idbTx('meta', 'readwrite', s => s.delete(id)); delete S.dl[id] }
 
@@ -326,11 +362,36 @@ function mpos(force) {
   try { navigator.mediaSession.setPositionState({ duration: au.duration, position: Math.min(au.currentTime, au.duration), playbackRate: au.playbackRate || 1 }) } catch (e) {}
 }
 // FIX: startPhone now accepts `byUser` flag. When autoplay/skip-next triggers it, byUser=false so the song won't appear in Recently Played UI.
-async function startPhone(byUser) {
+const HB = [];   // v24.3: songs played before (so Previous works even when the queue was replaced)
+
+/* v24.3: remember the song that was playing. After the app is closed and opened again it is shown (paused, at the same second) - it never starts by itself */
+const SAVE_K = 'lm-last'; let lastSave = 0;
+function saveLast(force) {
+  if (!S.cur || mode() !== 'phone') return; const n = Date.now(); if (!force && n - lastSave < 3000) return; lastSave = n;
+  try { const pos = au.readyState > 0 ? Math.floor(au.currentTime || 0) : (S.rp || 0); store.set(SAVE_K, JSON.stringify({ cur: S.cur, q: S.queue.slice(Math.max(0, S.qi), S.qi + 40), pos, hb: HB.slice(-30) })) } catch (e) {}
+}
+addEventListener('pagehide', () => saveLast(true));
+document.addEventListener('visibilitychange', () => { if (document.hidden) saveLast(true) });
+async function restoreLast() {
+  if (S.cur || mode() !== 'phone') return;
+  let d; try { d = JSON.parse(store.get(SAVE_K)) } catch (e) { return } if (!d || !d.cur) return;
+  const q = (Array.isArray(d.q) ? d.q : []).map(nt).filter(x => x && x.title); const t = q[0] || nt(d.cur); if (!t || !t.title) return;
+  S.queue = q.length ? q : [t]; S.qi = 0; S.cur = t; S.orig = null; userPaused = true; S.rp = +d.pos || 0;
+  (Array.isArray(d.hb) ? d.hb : []).forEach(x => { try { HB.push(nt(x)) } catch (e) {} });
+  const id = ytId(t); let src = '';
+  if (id && S.dl[id]) { try { const r = await idbTx('songs', 'readonly', s => s.get(id)); if (r && r.blob) src = blobUrl = URL.createObjectURL(r.blob) } catch (e) {} }
+  if (!src && navigator.onLine) src = streamUrl(t);
+  if (src) { const go = () => { au.removeEventListener('loadedmetadata', go); try { if (S.rp > 1) au.currentTime = S.rp } catch (e) {} au.pause(); ui() }; au.addEventListener('loadedmetadata', go); au.src = src }
+  mediaMeta(t); ui();
+}
+async function startPhone(byUser, back) {
   const t = S.queue[S.qi]; if (!t) return; userPaused = false;
-  const my = ++PT; S.cur = t; warmed = '';
+  const my = ++PT; if (byUser) HB.length = 0;   // v24.3: a song you start yourself has nothing before it
+  else if (!back && S.cur && S.cur !== t && (S.cur.uri || fb(S.cur)) !== (t.uri || fb(t))) { HB.push(S.cur); if (HB.length > 60) HB.shift() }
+  S.cur = t; t._f = 0; t._bx = 0; warmed = '';
   const id = ytId(t); let src = '';
   if (id && S.dl[id]) { try { const r = await idbTx('songs', 'readonly', s => s.get(id)); if (r && r.blob) { if (blobUrl) URL.revokeObjectURL(blobUrl); src = blobUrl = URL.createObjectURL(r.blob) } } catch (e) {} }
+  if (!src && id && S.dl[id]) { delete S.dl[id]; if (isPrem() && navigator.onLine) setTimeout(() => dlSong(t, true), 5000) }   // v24.3: the downloaded file is missing -> play it online and download it again by itself
   if (!src && PRE.url && PRE.key === preKey(t)) { if (blobUrl) { try { URL.revokeObjectURL(blobUrl) } catch (e) {} } src = blobUrl = PRE.url; PRE.url = ''; PRE.key = '' }
   else if (PRE.key !== preKey(t)) preDrop();
   if (my !== PT) return;
@@ -346,6 +407,7 @@ async function startPhone(byUser) {
   rpPush('song', { title: t.title, author: t.author, uri: t.uri, thumbnail: art(t) }, !!byUser);
   const h = jget('lm-hist', []); h.unshift({ a: t.author, t: t.title }); store.set('lm-hist', JSON.stringify(h.slice(0, 30)));
   ui();
+  saveLast(true);
   if (S.queue.length - S.qi <= 4) moreLikeThis();   // v24: always keep at least 4 songs ready in 'Up next'
 }
 let loadingMore = false, failRun = 0, lastMoreMs = 0;
@@ -462,7 +524,7 @@ function playFrom(list, i, asQueue, whole) {
 async function ctl(a, body) { if (!S.gid) return toast('Join a voice channel in Discord first'); try { await api(`/api/guilds/${S.gid}/${a}`, { method: 'POST', body: body || undefined }); poll() } catch (e) { toast(e.message) } }
 let userPaused = false, resumeT = null, skipFade = false;
 const act = {
-  toggle() { if (mode() === 'phone') { if (!S.cur) return; if (au.paused) { userPaused = false; au.play() } else { userPaused = true; au.pause() } } else ctl(S.playing ? 'pause' : 'resume') },
+  toggle() { if (mode() === 'phone') { if (!S.cur) return; if (au.paused) { userPaused = false; if (!au.getAttribute('src')) startPhone(false); else au.play() } else { userPaused = true; au.pause() } } else ctl(S.playing ? 'pause' : 'resume') },
   async next(auto) {
     if (mode() !== 'phone') return ctl('skip');
     if (auto !== true && S.cur && !au.paused && !skipFade) { skipFade = true; await new Promise(r => fadeTo(0, 320, r)); skipFade = false }
@@ -474,7 +536,15 @@ const act = {
     else if (S.queue.length > 1) { S.qi = 0; startPhone(false) }
     else { userPaused = true; au.pause(); toast('End of queue') }
   },
-  prev() { if (mode() === 'phone') { if (au.currentTime > 4 || S.qi < 1) au.currentTime = 0; else { S.qi--; startPhone(false) } } else ctl('previous') },
+  prev() {
+    if (mode() !== 'phone') return ctl('previous');
+    const cu = S.cur ? (S.cur.uri || fb(S.cur)) : ''; let p = null;
+    while (HB.length && !p) { const c = HB.pop(); if ((c.uri || fb(c)) !== cu) p = c }
+    if (!p) { au.currentTime = 0; return }   // nothing was played before this song
+    const pv = S.queue[S.qi - 1];
+    if (pv && (pv.uri || fb(pv)) === (p.uri || fb(p))) S.qi--; else S.queue.splice(S.qi, 0, p);
+    startPhone(false, true);
+  },
 };
 au.addEventListener('play', () => { S.playing = true; if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'; mpos(true); msSync(false); duckAuto(); ui() });
 au.addEventListener('pause', () => {
@@ -486,7 +556,7 @@ au.addEventListener('pause', () => {
      so we start it again by ourselves (retries for ~5 s only, so a real phone call is not interrupted for long). */
   if (!userPaused && S.cur && !au.ended && mode() === 'phone' && !(au.duration && au.duration - au.currentTime < .4)) {
     clearTimeout(resumeT); const t0 = Date.now();
-    const tryResume = n => { if (userPaused || !au.paused || Date.now() - t0 > 5000) return; au.play().catch(() => {}); resumeT = setTimeout(() => tryResume(n + 1), n < 2 ? 700 : 1500) };
+    const tryResume = n => { if (userPaused || !au.paused || Date.now() - t0 > 15000) return; au.play().catch(() => {}); resumeT = setTimeout(() => tryResume(n + 1), n < 2 ? 700 : 1500) };
     resumeT = setTimeout(() => tryResume(0), 450);
   }
 });
@@ -494,7 +564,7 @@ au.addEventListener('loadedmetadata', () => { mpos(true); nativeSync(true) });
 au.addEventListener('seeked', () => { mpos(true); nativeSync(true) });
 au.addEventListener('ended', () => act.next(true));
 au.addEventListener('timeupdate', () => {
-  ui(true); mpos();
+  if (!document.hidden) ui(true); mpos(); saveLast();
   if (navigator.onLine && Date.now() - lastWarmChk > 4000) { lastWarmChk = Date.now(); if (S.queue.length - S.qi <= 4) moreLikeThis(); warmAhead(); preloadNext() }
 });
 
@@ -511,6 +581,7 @@ setInterval(() => {
 /* coming back to the app (or unlocking the phone): rebuild the whole OS card for the song that is playing right now */
 /* v23.3: waking the phone fired visibilitychange + pageshow + focus together = 3x "rebuild the media card + re-download the artwork"
    right while the song is playing (that was the lag on screen on/off). Now it is done once, a moment later. */
+document.addEventListener('visibilitychange', () => { if (!document.hidden && S.cur) ui() });
 const msWake = () => { clearTimeout(msWake.t); msWake.t = setTimeout(() => { if (S.cur) msSync(true) }, 500) };
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
@@ -518,12 +589,20 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('pageshow', msWake);
 window.addEventListener('focus', msWake);
+const altQ = t => [fb(t)].filter(x => x.trim());   // v24.3: only the SAME song (its own id, then its exact title + artist) - never another upload or spelling
 au.addEventListener('error', async () => {
-  if (!au.src || au.src.startsWith('blob:')) return;
+  if (!au.src) return;
+  const ct = S.cur;
+  if (au.src.startsWith('blob:')) {   // v24.3: a broken downloaded / preloaded file -> forget it, play the song online (and download it again)
+    if (!ct || ct._bx || mode() !== 'phone') return; ct._bx = 1; const bid = ytId(ct);
+    if (bid && S.dl[bid]) { try { await dlRemove(bid) } catch (e) {} if (isPrem() && navigator.onLine) setTimeout(() => dlSong(ct, true), 6000) }
+    if (!navigator.onLine) return;
+    stallN = 0; clearTimeout(stallT); au.src = streamUrl(ct); playNow(); return;
+  }
   if (au.crossOrigin === 'anonymous' && !AX && !corsRetried) { corsRetried = true; EQ_OK = false; srcCors = false; store.set('lm-eq-cors', '0'); store.set('lm-eq-ts', String(Date.now())); au.removeAttribute('crossorigin'); const s0 = au.src; au.src = s0; au.load(); au.play().catch(() => {}); return }
   try { const r = await fetch(au.src, { headers: { Range: 'bytes=0-0' }, credentials: NAT ? 'omit' : 'same-origin' }); if (r.status === 426) return showUpdate({ update_required: true }) } catch (e) {}
-  const ct = S.cur;
-  if (ct && !ct._q && ytId(ct)) { ct._q = 1; stallN = 0; clearTimeout(stallT); au.src = streamUrlQ(ct); playNow(); return }   // id failed -> find the same song by name
+  /* v24.3: the file was not found -> find the same song again by itself: by name, then with other spellings, before giving up */
+  if (ct) { const tries = ytId(ct) ? altQ(ct) : altQ(ct).slice(1); if ((ct._f || 0) < tries.length) { const qq = tries[ct._f++]; stallN = 0; clearTimeout(stallT); au.src = withMt(U(`/api/app/stream?q=${encodeURIComponent(qq.slice(0, 150))}&av=${CV}&hq=${isPrem() ? 1 : 0}`)); playNow(); return } }
   if (recover('error')) return;
   /* v24.2: no "couldn't play / skipping" popups any more - just quietly move on to the next track */
   if (++failRun >= 4) { failRun = 0; userPaused = true; ui(); return }
@@ -539,8 +618,25 @@ function recover(why) {
   return true;
 }
 au.preload = 'auto';
-au.addEventListener('waiting', () => { clearTimeout(stallT); stallT = setTimeout(() => { if (!au.paused && au.readyState < 3) recover('stall') }, 6500) });
-['playing', 'canplay', 'pause', 'emptied'].forEach(e => au.addEventListener(e, () => clearTimeout(stallT)));
+/* v24.3: if the song stutters (game / voice chat / weak network) the WHOLE song is loaded into the phone's memory and playback continues from there,
+   so the network and the busy CPU can no longer interrupt it. Also done when the app goes to the background before the song is fully loaded. */
+const SW = { busy: false }; let swT = 0;
+async function smoothSwap() {
+  if (SW.busy || !S.cur || mode() !== 'phone' || !navigator.onLine) return;
+  const src = au.src; if (!src || src.startsWith('blob:')) return;
+  const my = PT; SW.busy = true;
+  try {
+    const r = await fetch(src, { credentials: NAT ? 'omit' : 'same-origin' }); if (!r.ok) throw 0;
+    const b = await r.blob(); if (my !== PT || au.src !== src || b.size < 50000) throw 0;
+    const pos = au.currentTime, old = blobUrl, u = URL.createObjectURL(b); blobUrl = u;
+    const go = () => { au.removeEventListener('loadedmetadata', go); try { if (pos > 0.5) au.currentTime = pos } catch (e) {} if (!userPaused) au.play().catch(() => {}) };
+    au.addEventListener('loadedmetadata', go); au.src = u; stallN = 0; clearTimeout(stallT);
+    if (old && old !== u) setTimeout(() => { try { URL.revokeObjectURL(old) } catch (e) {} }, 4000);
+  } catch (e) {} finally { SW.busy = false }
+}
+au.addEventListener('waiting', () => { clearTimeout(stallT); clearTimeout(swT); swT = setTimeout(() => { if (!au.paused && au.readyState < 3) smoothSwap() }, 1800); stallT = setTimeout(() => { if (!au.paused && au.readyState < 3) recover('stall') }, 6500) });
+['playing', 'canplay', 'pause', 'emptied'].forEach(e => au.addEventListener(e, () => { clearTimeout(stallT); clearTimeout(swT) }));
+document.addEventListener('visibilitychange', () => { if (document.hidden) setTimeout(() => { if (document.hidden && S.playing && !fullyLoaded()) smoothSwap() }, 1500) });
 au.addEventListener('playing', () => { failRun = 0; if (au.currentTime > 5) stallN = 0 });
 
 /* v23.4: NO automatic resume. If a call, reel, video or another app takes the audio, the song stays paused until the user taps play. */
@@ -637,7 +733,8 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) setTimeout(() => { if (document.hidden && S.playing) duckSet(DUCK_LEVEL) }, 350);   // small delay: a quick glance at a notification should not dip the sound
   else duckSet(1);
 });
-setInterval(() => {   // fade-out like the end of a radio track: volume goes down smoothly during the last 4 s
+setInterval(() => {   // fade-out like the end of a radio track
+  if (document.hidden) { if (fadeM !== 1 && !fadeIv) fadeSet(1); return }   // v24.3: nothing to animate in the background: volume goes down smoothly during the last 4 s
   if (fadeIv || mode() !== 'phone' || !S.cur || au.paused || !(au.duration > 15)) return;
   const left = au.duration - au.currentTime;
   if (left <= FADE_S && left > .05 && S.rep !== 'one') fadeSet(Math.pow(left / FADE_S, 1.4));
@@ -810,7 +907,7 @@ $('#np').addEventListener('touchend', e => { const top = e.target.closest('.np-t
 
 /* ───────── pieces ───────── */
 const eqHtml = '<span class="eqb"><i></i><i></i><i></i></span>';
-const rowHtml = (t, attrs, on, extra = '') => { const id = ytId(t); return `<button class="row${on ? ' on' : ''}" ${attrs}><span class="th" style="${bgi(art(t))}"></span><span class="tx"><span class="t">${on ? eqHtml : ''}${esc(t.title)}${id && S.dl[id] ? '<span class="dl-ok"><svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></span>' : ''}</span><span class="s">${esc(t.author)}</span></span>${extra}</button>` };
+const rowHtml = (t, attrs, on, extra = '') => { const id = ytId(t); return `<button class="row${on ? ' on' : ''}" ${attrs}><span class="th" style="${bgi(art(t))}"></span><span class="tx"><span class="t">${on ? eqHtml : ''}${esc(t.title)}${id ? `<span class="dl-slot" data-dlid="${id}">${dlMark(id)}</span>` : ''}</span><span class="s">${esc(t.author)}</span></span>${extra}</button>` };
 /* v23.2: every song gets a visible "+" — tap it and you get: Add to Liked, then your playlists,
    then "New playlist". Works from any list (search, home, playlist, queue, player). */
 const songRow = (name, i, t, extra = '') => rowHtml(t, `data-a="play" data-l="${name}" data-i="${i}"`, S.cur && S.cur.uri && S.cur.uri === t.uri, `<span class="d">${t.duration ? fmt(t.duration) : ''}</span>${extra}`);
@@ -1233,6 +1330,8 @@ async function library() {
   h += p.map(x => rowP(x, `${x.track_count} songs · ${x.is_public && isPrem() ? 'Public' : 'Private'}${x.locked ? ' · 🔒' : ''}${x.collab ? ' · Collaborative' : ''}`, 'own')).join('');
   if (!p.length) h += `<div class="empty">${isPrem() ? 'No playlists yet. Create your first one!' : 'Creating playlists is a Premium feature'}</div>`;
   if (sv.length) h += `<h2>Saved playlists</h2>` + sv.map(x => rowP(x, `${x.track_count || 0} songs`, 'saved')).join('');
+  const dp = dlPlGet();
+  if (dp.length) h += `<h2>Downloaded playlists</h2>` + dp.map(x => `<button class="row" data-a="open-pl" data-code="${esc(x.code)}"><span class="th" ${x.code === 'liked' ? '' : `data-plcode="${plc(x.code)}"`} style="${bgi(x.cover || '/static/pwa/icon-512.png')}"></span><span class="tx"><span class="t">${esc(x.name)}<span class="dl-ok">${DL_TICK}</span></span><span class="s">${(x.ids || []).length} songs · downloaded</span></span><span class="ib more" role="button" data-a="dlpl-rm" data-code="${esc(x.code)}" aria-label="Remove"><svg viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg></span></button>`).join('');
   if ($('#lib')) $('#lib').innerHTML = h;
 }
 
@@ -1297,7 +1396,7 @@ async function playlist(code) {
     else {
       // /api/playlist/info has cover_image_url, banner_image_url and owner_name; /api/playlists/code/{code} does not (that is why the inside cover differed from the outside one)
       try { p = await api('/api/playlist/info?code=' + encodeURIComponent(code)) }
-      catch (e) { if (e.offline || [403, 404, 426, 429].includes(e.status)) throw e; p = await api('/api/playlists/code/' + encodeURIComponent(code)) }
+      catch (e) { if (e.offline && dlPlHas(code)) p = await dlPlOffline(dlPlHas(code)); else { if (e.offline || [403, 404, 426, 429].includes(e.status)) throw e; p = await api('/api/playlists/code/' + encodeURIComponent(code)) } }
     }
     if (my !== RT) return;
     if (!PTK.loaded) { PTK.loaded = 1; await ptkLoad() }
@@ -1321,7 +1420,7 @@ async function playlist(code) {
       ${(p.is_owner || p.collab) && code !== 'liked' && isPrem() ? `<button class="btn ghost" data-a="pl-edit" data-pid="${p.id}" data-code="${esc(up)}">${ic('edit')} Edit</button>` : ''}
       <button class="btn ghost" data-a="pl-copy" data-code="${esc(up)}">${ic('copy')} Share</button>
       ${shareCollabBtn}
-      <button class="btn ghost" data-a="pl-dl">${ic('dl')} Download ${isPrem() ? '' : ic('crown', 'gold')}</button></div>
+      <button class="btn ghost${dlPlDone(L.pl) ? ' dl-done' : ''}" data-a="pl-dl">${dlPlDone(L.pl) ? '<span class="dl-ok">' + DL_TICK + '</span> Downloaded' : ic('dl') + ' Download ' + (isPrem() ? '' : ic('crown', 'gold'))}</button></div>
       ${collabBadge}` +
       (L.pl.length ? L.pl.map((x, i) => songRow('pl', i, x, moreBtn('pl', i))).join('') : '<div class="empty">This playlist is empty</div>') + collabLine;
   } catch (e) { if (my === RT) view.innerHTML = `<div class="empty">${esc(e.message)}</div>` }
@@ -1384,7 +1483,7 @@ function carSet() {
   /* v23.6: if there is no next/previous song, hide the side covers completely instead of leaving two empty grey boxes */
   carEl.classList.toggle('solo', !pv && !nx);
 }
-function goPrev(fromLock) { if (mode() !== 'phone') return act.prev(); if (au.currentTime > 4 && fromLock) { au.currentTime = 0; return } if (S.qi > 0) { S.qi--; startPhone(false) } else au.currentTime = 0 }
+function goPrev(fromLock) { act.prev() }
 (() => {   // swipe the cover left / right = next / previous song
   let x0 = 0, y0 = 0, dx = 0, lock = 0, t0 = 0, w = 300, on = false;
   const set = v => carEl.style.setProperty('--dx', v + 'px');
@@ -1448,13 +1547,18 @@ document.addEventListener('visibilitychange', () => { document.documentElement.c
 
 /* ── lyrics for EVERY song: our server -> lrclib (exact, then search with several spellings) -> lyrics.ovh ── */
 async function lyricsFallback(t) {
-  const title = cleanT(t.title), art_ = cleanT(String(t.author || '').replace(/\s*-\s*topic$/i, '').replace(/vevo$/i, '')).split(/[,&]|\bfeat\b|\bft\b/i)[0].trim(), dur = Math.round((t.duration || 0) / 1000), eu = encodeURIComponent;
+  const strip = s => cleanT(String(s || '').replace(/\s*-\s*topic$/i, '').replace(/vevo$/i, '')).replace(/\b(official|lyrics?|lyrical|audio|video|full song|hd|4k)\b/gi, ' ').replace(/\s+/g, ' ').trim();
+  const rawT = String(t.title || ''), au0 = strip(String(t.author || '').split(/[,&]|\bfeat\b|\bft\b/i)[0]), parts = rawT.split(/\s[-–—]\s/);
+  // "Artist - Song" titles (the channel name is often not the singer): try that split first
+  let title = strip(rawT), art_ = au0;
+  if (parts.length >= 2) { const a2 = strip(parts[0].split(/[,&]|\bfeat\b|\bft\b/i)[0]), s2 = strip(parts.slice(1).join(' - ')); if (a2 && s2) { title = s2; art_ = a2 } }
+  const dur = Math.round((t.duration || 0) / 1000), eu = encodeURIComponent;
   const tm = (u, ms) => Promise.race([fetch(u).then(r => r.ok ? r.json() : null), new Promise((_, rj) => setTimeout(() => rj(new Error('t')), ms || 5500))]).catch(() => null);
   const pick = a => { if (!Array.isArray(a) || !a.length) return null; const ok = a.filter(x => !dur || !x.duration || Math.abs(x.duration - dur) <= 8); const pool = ok.length ? ok : a; return pool.find(x => x.syncedLyrics) || pool.find(x => x.plainLyrics) || null };
-  const mk = d => { const lines = parseLrc(d.syncedLyrics || ''); return { lines, plain: d.plainLyrics || lines.map(l => l.x).join('\n') } };
+  const mk = d => { let lines = parseLrc(d.syncedLyrics || ''); const plain = d.plainLyrics || lines.map(l => l.x).join('\n'), pn = plain.split('\n').filter(x => x.trim()).length; if (lines.length && pn > 8 && lines.length < pn * .6) lines = []; return { lines, plain } };   // v24.3: a timed list that misses a big part of the song -> show the full text instead
   // v24: every lrclib question is asked AT THE SAME TIME (before: one after another, up to 7 s each)
   const getP = tm(`https://lrclib.net/api/get?track_name=${eu(title)}&artist_name=${eu(art_)}${dur ? '&duration=' + dur : ''}`, 5000);
-  const sPs = [title + ' ' + art_, title, String(t.title || '').replace(/\(.*?\)|\[.*?\]/g, ' ')].filter(q => q.trim()).map(q => tm('https://lrclib.net/api/search?q=' + eu(q.trim()), 5500).then(pick));
+  const sPs = [title + ' ' + art_, title, au0 + ' ' + title, strip(rawT), rawT.replace(/\(.*?\)|\[.*?\]/g, ' ')].filter((q, k, r) => q.trim() && r.indexOf(q) === k).map(q => tm('https://lrclib.net/api/search?q=' + eu(q.trim()), 5500).then(pick));
   const g = await getP;
   if (g && g.syncedLyrics) return mk(g);                                   // timed lyrics first
   for (const p of sPs) { const r = await p; if (r && r.syncedLyrics) return mk(r) }
@@ -1760,7 +1864,7 @@ function shuffleToggle() {
 /* ───────── lyrics (v22.6): written in the song's own language, full-screen view, no copying ───────── */
 const LY = { key: '', lines: [], plain: '', idx: -1, vi: -2, adj: 0, state: 'none' }, lyCache = new Map(), LYV = { on: false, pp: null };
 const cleanT = s => String(s || '').replace(/\(.*?\)|\[.*?\]|official.*|lyric.*|video.*|\|.*|ft\..*|feat\..*/gi, '').replace(/\s+/g, ' ').trim();
-const parseLrc = s => String(s || '').split('\n').map(l => { const m = l.match(/^\[(\d+):(\d+(?:\.\d+)?)\]\s*(.*)$/); return m && m[3] ? { t: (+m[1]) * 60 + parseFloat(m[2]), x: m[3] } : null }).filter(Boolean);
+const parseLrc = s => { const out = []; String(s || '').split('\n').forEach(l => { const ts = []; let m, re = /\[(\d+):(\d+(?:[.:]\d+)?)\]/g, last = 0; while ((m = re.exec(l)) && m.index === last) { ts.push((+m[1]) * 60 + parseFloat(m[2].replace(':', '.'))); last = re.lastIndex } const x = l.slice(last).trim(); if (ts.length && x) ts.forEach(t => out.push({ t, x })) }); return out.sort((a, b) => a.t - b.t) };   // v24.3: repeated lines "[00:10][00:50] text" are no longer lost
 async function lyricsFetch(t) {
   // 1) our server: finds the lyrics and writes them in the song's language (Punjabi -> Gurmukhi, Hindi -> Devanagari ...)
   try {
@@ -1790,7 +1894,7 @@ async function lyricsLoad(t) {
     const full = lyricsFetch(t).catch(() => null), fast = lyricsFallback(t).catch(() => null);
     d = await new Promise(res => { let n = 0; const done = r => { if (r) res(r); else if (++n === 2) res(null) }; fast.then(done); full.then(done) });
     lyCache.set(key, d); if (lyCache.size > 40) lyCache.delete(lyCache.keys().next().value);
-    if (d) full.then(r => { if (r && r !== d && r.lines && r.lines.length && lySig(r) !== lySig(d) && lyCache.get(key) === d) { lyCache.set(key, r); if (LY.key === key) lyApply(r) } });
+    if (d) full.then(r => { if (r && r !== d && ((r.lines && r.lines.length && lySig(r) !== lySig(d)) || (!(d.lines && d.lines.length) && (r.plain || '').length > (d.plain || '').length * 1.3)) && lyCache.get(key) === d) { lyCache.set(key, r); if (LY.key === key) lyApply(r) } });
   }
   if (LY.key !== key) return;
   lyApply(d);
@@ -1990,10 +2094,11 @@ document.addEventListener('click', async e => {
   else if (a === 'dl-play') { if (L.dl && L.dl.length) playFrom(L.dl, 0, true, false) }
   else if (a === 'dl-clear') { if (await askYes('Delete all downloaded songs from this phone?', 'Delete')) { for (const x of (await dlMeta())) await dlRemove(x.id); toast('Downloads deleted'); route() } }
   else if (a === 'open-dl') location.hash = '#downloads';
+  else if (a === 'dlpl-rm') { e.stopPropagation(); const c = el.dataset.code; if (await askYes('Remove this playlist from Downloaded playlists? The songs stay in Downloads.', 'Remove')) { store.set('lm-dlpl', JSON.stringify(dlPlGet().filter(x => x.code !== c))); toast('Removed'); route() } }
   else if (a === 'pl-dl') {
-    if (!isPrem()) return premiumSheet('Downloading songs to listen offline is a Premium feature.');
-    const l = (L.pl || []).filter(x => ytId(x) && !S.dl[ytId(x)]); if (!l.length) return toast('Everything here is already downloaded');
-    let n = 0; for (const t of l) { toast(`Downloading ${++n}/${l.length}…`); if (!(await dlSong(t, true))) break } toast('Playlist downloaded'); route();
+    const m = L.plMeta || {}, hc = (location.hash.match(/^#code\/([^?\/]+)/) || [])[1] || m.code || '';
+    if (!hc) return toast("Can't download this playlist");
+    await dlPlaylist(hc, m.name, fixUrl(m.cover_image_url) || '', L.pl || []); if (location.hash.startsWith('#code/')) route();
   }
   else if (a === 'pl-save') {
     const c = el.dataset.code, on = S.saved.has(c);
@@ -2100,7 +2205,11 @@ document.addEventListener('click', async e => {
   }
   else if (a === 'plm-dl') {
     closeSheet(); if (!isPrem()) return premiumSheet('Downloading songs to listen offline is a Premium feature.');
-    try { const l = (await plTracks(el.dataset.code)).filter(x => ytId(x) && !S.dl[ytId(x)]); if (!l.length) return toast('Everything here is already downloaded'); let n = 0; for (const t of l) { toast(`Downloading ${++n}/${l.length}…`); if (!(await dlSong(t, true))) break } toast('Playlist downloaded') } catch (er) { toast(er.message) }
+    try {
+      const c = el.dataset.code; let nm = el.dataset.name || '', cv = '';
+      try { const i = await api('/api/playlist/info?code=' + encodeURIComponent(c)); nm = i.name || nm; cv = fixUrl(i.cover_image_url) || '' } catch (e) {}
+      await dlPlaylist(c, nm, cv, await plTracks(c)); if (location.hash === '#library') route();
+    } catch (er) { toast(er.message) }
   }
   else if (a === 'plm-del') { closeSheet(); if (!(await askYes('Delete this playlist for good?', 'Delete'))) return; try { await api('/api/playlists/' + el.dataset.pid, { method: 'DELETE' }); ev('pl_delete', { code: el.dataset.code }); toast('Playlist deleted'); route() } catch (er) { toast(er.message) } }
   else if (a === 'plm-unsave') { closeSheet(); const c = String(el.dataset.code).toUpperCase(); try { await api('/api/app/saved/' + encodeURIComponent(c), { method: 'DELETE' }); S.saved.delete(c); toast('Removed from your library'); route() } catch (er) { toast(er.message) } }
@@ -2534,7 +2643,7 @@ setTimeout(() => { try { if (!view.innerHTML.trim()) view.innerHTML = '<div clas
   ev('open', { extra: (NAT ? 'apk v' : 'web app v') + CV });
   if (NAT) { const ex = $('.np-ex'); if (ex) ex.insertAdjacentHTML('afterbegin', '<button class="ib" data-a="speed" id="np-speed" aria-label="Playback speed">1x</button>'); applySpeed() }
   await Promise.race([syncDown(), new Promise(r => setTimeout(r, 2500))]);
-  route(); poll();
+  route(); poll(); restoreLast();
   if (!NAT && 'serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(reg => {
       const watch = w => w && w.addEventListener('statechange', () => { if (w.state === 'installed' && navigator.serviceWorker.controller) showUpdate({ notes: 'New app files are ready.' }) });
