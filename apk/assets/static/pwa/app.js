@@ -362,7 +362,26 @@ function mpos(force) {
   try { navigator.mediaSession.setPositionState({ duration: au.duration, position: Math.min(au.currentTime, au.duration), playbackRate: au.playbackRate || 1 }) } catch (e) {}
 }
 // FIX: startPhone now accepts `byUser` flag. When autoplay/skip-next triggers it, byUser=false so the song won't appear in Recently Played UI.
-const HB = [];   // v24.3: songs played before (so Previous works even when the queue was replaced)
+const HB = [];
+/* v24.3: Spotify-like loading. The WHOLE song is fetched first (normally 1-2 s) and plays from the phone's memory, so the network, a game
+   or the screen being off cannot make it stutter (a normal <audio> stream stops loading in the background = the stuttering).
+   Very slow network (> LOAD_WAIT) -> it starts streaming at once and is swapped to the memory copy as soon as that is complete. */
+const LOAD_WAIT = 3000, CURP = { my: 0, p: null, ctl: null };
+function fullFetch(url) {
+  const ctl = new AbortController();
+  const p = fetch(url, { credentials: NAT ? 'omit' : 'same-origin', signal: ctl.signal }).then(r => r.ok ? r.blob() : null)
+    .then(b => (b && b.size >= 50000 && /^(audio|video)\/|octet/.test(b.type || 'audio/')) ? b : null).catch(() => null);
+  return { p, ctl };
+}
+function swapIn(b) {
+  if (!b || !au.src || au.src.startsWith('blob:') || !S.cur) return;
+  if (au.duration > 0 && au.duration - au.currentTime < 3) return;
+  const pos = au.currentTime, old = blobUrl, u = URL.createObjectURL(b); blobUrl = u;
+  const go = () => { au.removeEventListener('loadedmetadata', go); try { if (pos > 0.5) au.currentTime = pos } catch (e) {} if (!userPaused) au.play().catch(() => {}) };
+  au.addEventListener('loadedmetadata', go); au.src = u; stallN = 0; clearTimeout(stallT);
+  if (old && old !== u) setTimeout(() => { try { URL.revokeObjectURL(old) } catch (e) {} }, 4000);
+}
+   // v24.3: songs played before (so Previous works even when the queue was replaced)
 
 /* v24.3: remember the song that was playing. After the app is closed and opened again it is shown (paused, at the same second) - it never starts by itself */
 const SAVE_K = 'lm-last'; let lastSave = 0;
@@ -396,7 +415,16 @@ async function startPhone(byUser, back) {
   else if (PRE.key !== preKey(t)) preDrop();
   if (my !== PT) return;
   if (!src && !navigator.onLine) { toast("You're offline. Only downloaded songs play."); ui(); return }
-  const url = src || streamUrl(t);
+  let url = src || streamUrl(t);
+  try { CURP.ctl && CURP.ctl.abort() } catch (e) {} CURP.p = null; CURP.ctl = null;
+  if (!src && mode() === 'phone' && !(navigator.connection && navigator.connection.saveData)) {
+    clearInterval(fadeIv); fadeIv = null; fadeSet(0, true); mediaMeta(t); ui();      // the old song goes quiet, the new one is shown while it loads
+    const full = fullFetch(url); CURP.my = my; CURP.p = full.p; CURP.ctl = full.ctl;
+    const b = await Promise.race([full.p, new Promise(r => setTimeout(() => r(null), LOAD_WAIT))]);
+    if (my !== PT) return;
+    if (b) { if (blobUrl) { try { URL.revokeObjectURL(blobUrl) } catch (e) {} } src = blobUrl = URL.createObjectURL(b); url = src }
+    else full.p.then(bb => { if (bb && my === PT) swapIn(bb) });
+  }
   if (NAT && EQ_OK === null) eqPrime(src ? streamUrl(t) : url);   // v24: never waits - the very first launch plays at once, the sound chain starts with the next song
   clearInterval(fadeIv); fadeIv = null; fadeSet(0, true); srcCors = au.crossOrigin === 'anonymous';
   { const mb = $('#mini-bar'); if (mb) { mb.style.transition = 'none'; mb.style.width = '0'; requestAnimationFrame(() => requestAnimationFrame(() => { mb.style.transition = '' })) } }
@@ -407,7 +435,7 @@ async function startPhone(byUser, back) {
   rpPush('song', { title: t.title, author: t.author, uri: t.uri, thumbnail: art(t) }, !!byUser);
   const h = jget('lm-hist', []); h.unshift({ a: t.author, t: t.title }); store.set('lm-hist', JSON.stringify(h.slice(0, 30)));
   ui();
-  saveLast(true);
+  saveLast(true); setTimeout(() => { if (my === PT) preloadNext() }, 800);   // the next song starts loading right away
   if (S.queue.length - S.qi <= 4) moreLikeThis();   // v24: always keep at least 4 songs ready in 'Up next'
 }
 let loadingMore = false, failRun = 0, lastMoreMs = 0;
@@ -626,13 +654,9 @@ async function smoothSwap() {
   const src = au.src; if (!src || src.startsWith('blob:')) return;
   const my = PT; SW.busy = true;
   try {
-    const r = await fetch(src, { credentials: NAT ? 'omit' : 'same-origin' }); if (!r.ok) throw 0;
-    const b = await r.blob(); if (my !== PT || au.src !== src || b.size < 50000) throw 0;
-    const pos = au.currentTime, old = blobUrl, u = URL.createObjectURL(b); blobUrl = u;
-    const go = () => { au.removeEventListener('loadedmetadata', go); try { if (pos > 0.5) au.currentTime = pos } catch (e) {} if (!userPaused) au.play().catch(() => {}) };
-    au.addEventListener('loadedmetadata', go); au.src = u; stallN = 0; clearTimeout(stallT);
-    if (old && old !== u) setTimeout(() => { try { URL.revokeObjectURL(old) } catch (e) {} }, 4000);
-  } catch (e) {} finally { SW.busy = false }
+    let pr = CURP.my === my && CURP.p; if (!pr) { const f = fullFetch(src); CURP.my = my; CURP.p = pr = f.p; CURP.ctl = f.ctl }
+    const b = await pr; if (b && my === PT && au.src === src) swapIn(b);
+  } finally { SW.busy = false }
 }
 au.addEventListener('waiting', () => { clearTimeout(stallT); clearTimeout(swT); swT = setTimeout(() => { if (!au.paused && au.readyState < 3) smoothSwap() }, 1800); stallT = setTimeout(() => { if (!au.paused && au.readyState < 3) recover('stall') }, 6500) });
 ['playing', 'canplay', 'pause', 'emptied'].forEach(e => au.addEventListener(e, () => { clearTimeout(stallT); clearTimeout(swT) }));
