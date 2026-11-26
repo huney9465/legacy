@@ -36,12 +36,13 @@ def patch_manifest(d):
     return d.replace(old, new)
 
 def patch_js(t):
-    t = t.replace(f"(v{BASE})", f"(v{NEW})", 1)
-    assert f"const CV = '{BASE}';" in t, "const CV not found in app.js"
-    return t.replace(f"const CV = '{BASE}';", f"const CV = '{NEW}';")
+    # app.js may already carry a different version than BASE (only the manifest needs BASE), so match any X.Y
+    t = re.sub(r"\(v\d+\.\d+\)", f"(v{NEW})", t, count=1)
+    assert re.search(r"const CV = '\d+\.\d+';", t), "const CV not found in app.js"
+    return re.sub(r"const CV = '\d+\.\d+';", f"const CV = '{NEW}';", t)
 
 def patch_html(t):
-    return t.replace(f"?v={BASE}", f"?v={NEW}")
+    return re.sub(r"(app\.(?:css|js)\?v=)\d+\.\d+", lambda m: m.group(1) + NEW, t)
 
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
 if os.path.exists(OUT):
