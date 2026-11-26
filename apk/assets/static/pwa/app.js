@@ -180,7 +180,7 @@ async function syncDown() {
     store.set('lm-rp', JSON.stringify(arr(d.recent)));
     store.set('lm-pc', JSON.stringify(d.plays || {}));
   } catch (e) {}
-  plArtLoad();
+  plArtLoad(); ptkLoad().then(ptkApply);
 }
 
 /* ───────── recently played (songs + playlists) ───────── */
@@ -276,7 +276,7 @@ async function preloadNext() {
   const c = navigator.connection; if (c && c.saveData) return;
   const n = S.queue[S.qi + 1]; if (!n) return;
   const key = preKey(n); if (!key || PRE.key === key || (ytId(n) && S.dl[ytId(n)])) return;
-  if (!fullyLoaded() && !(au.currentTime > 20 || (au.duration > 0 && au.buffered.length && au.buffered.end(au.buffered.length - 1) >= au.duration * .7))) return;
+  if (!fullyLoaded() && !(au.currentTime > 8 || (au.duration > 0 && au.buffered.length && au.buffered.end(au.buffered.length - 1) >= au.duration * .5))) return;   // v23.2: earlier than before (was 20 s / 70 %)
   const my = PT; PRE.busy = key; PRE.ctl = new AbortController();
   try {
     const r = await fetch(streamUrl(n), { credentials: NAT ? 'omit' : 'same-origin', signal: PRE.ctl.signal });
@@ -337,8 +337,9 @@ async function startPhone(byUser) {
   if (!src && !navigator.onLine) { toast("You're offline. Only downloaded songs play."); ui(); return }
   const url = src || streamUrl(t);
   if (NAT && EQ_OK === null) eqPrime(src ? streamUrl(t) : url);   // v24: never waits - the very first launch plays at once, the sound chain starts with the next song
-  fadeSet(1, true); srcCors = au.crossOrigin === 'anonymous';
-  stallN = 0; clearTimeout(stallT); au.src = url; eqApply(); playNow();
+  clearInterval(fadeIv); fadeIv = null; fadeSet(0, true); srcCors = au.crossOrigin === 'anonymous';
+  { const mb = $('#mini-bar'); if (mb) { mb.style.transition = 'none'; mb.style.width = '0'; requestAnimationFrame(() => requestAnimationFrame(() => { mb.style.transition = '' })) } }
+  stallN = 0; clearTimeout(stallT); au.src = url; eqApply(); playNow(); fadeTo(1, 550);
   warmSoon();
   mediaMeta(t);
   // push to recently played — only when user explicitly chose this song
@@ -459,11 +460,12 @@ function playFrom(list, i, asQueue, whole) {
   else discordPlay(whole ? list : [list[i]], whole ? i : 0);
 }
 async function ctl(a, body) { if (!S.gid) return toast('Join a voice channel in Discord first'); try { await api(`/api/guilds/${S.gid}/${a}`, { method: 'POST', body: body || undefined }); poll() } catch (e) { toast(e.message) } }
-let userPaused = false;
+let userPaused = false, resumeT = null, skipFade = false;
 const act = {
   toggle() { if (mode() === 'phone') { if (!S.cur) return; if (au.paused) { userPaused = false; au.play() } else { userPaused = true; au.pause() } } else ctl(S.playing ? 'pause' : 'resume') },
   async next(auto) {
     if (mode() !== 'phone') return ctl('skip');
+    if (auto !== true && S.cur && !au.paused && !skipFade) { skipFade = true; await new Promise(r => fadeTo(0, 320, r)); skipFade = false }
     if (auto === true && S.rep === 'one') { au.currentTime = 0; au.play(); return }
     // FIX: skip/next inside a queue is NOT a user song-selection — don't add to RP
     if (S.qi + 1 < S.queue.length) { S.qi++; startPhone(false) }
@@ -480,6 +482,13 @@ au.addEventListener('pause', () => {
   /* v23.1: if Android took the audio focus away (a game / another player started) while we were in the background,
      remember it so the song continues as soon as we are back - instead of silently staying paused. */
   ui();
+  /* v23.2: headset mic / voice chat / Bluetooth switching to call mode makes Android pause the song for a moment. It was NOT paused by the user,
+     so we start it again by ourselves (retries for ~5 s only, so a real phone call is not interrupted for long). */
+  if (!userPaused && S.cur && !au.ended && mode() === 'phone' && !(au.duration && au.duration - au.currentTime < .4)) {
+    clearTimeout(resumeT); const t0 = Date.now();
+    const tryResume = n => { if (userPaused || !au.paused || Date.now() - t0 > 5000) return; au.play().catch(() => {}); resumeT = setTimeout(() => tryResume(n + 1), n < 2 ? 700 : 1500) };
+    resumeT = setTimeout(() => tryResume(0), 450);
+  }
 });
 au.addEventListener('loadedmetadata', () => { mpos(true); nativeSync(true) });
 au.addEventListener('seeked', () => { mpos(true); nativeSync(true) });
@@ -560,15 +569,15 @@ async function eqProbe(url) {
   if (EQ_OK) au.crossOrigin = 'anonymous';
 }
 let fadeM = 1, srcCors = false, corsRetried = false;
-const FADE_S = 4;   // v24: the last 4 seconds of every song fade out smoothly, then the next song starts
+const FADE_S = 2;   // v23.2: the last 2 seconds of every song fade out smoothly, then the next song starts
 { const na = document.getElementById('np-auto'); if (na) na.hidden = true }   // v24: autoplay is always on
 const VOL_PLAIN = .5;   // used when the sound chain is not possible (no CORS / old WebView): at least a softer level
 try { au.volume = VOL_PLAIN } catch (e) {}
 /* v24 sound: "Spotify-like" = flat, smooth, loudness-controlled (their Normal level is quieter than raw files) - warm body, soft highs,
    a limiter so nothing is sharp. Bass boost OFF = natural bass. Bass boost ON = clear punchy kick (62 Hz thump + 105 Hz body). */
 function eqApply() {
-  if (!EQ_OK || !srcCors) { try { au.volume = VOL_PLAIN * fadeM } catch (e) {} return }   // the chain only for a song that was loaded with CORS on (else it would be silent)
-  const on = store.get('lm-bass') !== '0', pr = isPrem();
+  if (!EQ_OK || !srcCors || (!AX && store.get('lm-bass') !== '1')) { try { au.volume = VOL_PLAIN * fadeM } catch (e) {} return }   // v23.2: plain <audio> by default = light on CPU/RAM, no audio-graph that can stall in the background   // the chain only for a song that was loaded with CORS on (else it would be silent)
+  const on = store.get('lm-bass') === '1', pr = isPrem();
   try {
     if (!AX) {
       const C = window.AudioContext || window.webkitAudioContext; if (!C) { au.volume = VOL_PLAIN * fadeM; return }
@@ -599,7 +608,7 @@ function eqApply() {
    When a game (or any other app) comes to the front, our app goes to the background. Instead of stopping
    the music we simply "duck" it: the volume drops to 35 % so the game's sound stays on top and the song
    keeps playing quietly underneath. Come back and it rises to 100 % again. Toggle in You → Auto volume. */
-let duckOn = store.get('lm-duck') !== '0';
+let duckOn = store.get('lm-duck2') === '1';   // v23.2: OFF by default (new users). The user can turn it on in You -> Auto volume
 let duckM = 1, focusPaused = false;
 const DUCK_LEVEL = .35;
 function applyGain(hard) {
@@ -612,6 +621,15 @@ function applyGain(hard) {
 function fadeSet(m, hard) {
   if (m === fadeM && !hard) return; fadeM = m; applyGain(hard);
 }
+let fadeIv = null;
+/* v23.2: smooth volume ramp (works for the plain <audio> path too, which has no gain node) */
+function fadeTo(target, ms, done) {
+  clearInterval(fadeIv); const from = fadeM, steps = Math.max(1, Math.round(ms / 40)); let n = 0;
+  fadeIv = setInterval(() => {
+    n++; const k = n / steps; fadeSet(from + (target - from) * (k * k * (3 - 2 * k)), true);
+    if (n >= steps) { clearInterval(fadeIv); fadeIv = null; if (done) done() }
+  }, 40);
+}
 function duckSet(m) { if (Math.abs(m - duckM) < .01) return; duckM = m; applyGain(false) }
 function duckAuto() { duckSet((duckOn && document.hidden && S.playing) ? DUCK_LEVEL : 1) }
 document.addEventListener('visibilitychange', () => {
@@ -620,11 +638,11 @@ document.addEventListener('visibilitychange', () => {
   else duckSet(1);
 });
 setInterval(() => {   // fade-out like the end of a radio track: volume goes down smoothly during the last 4 s
-  if (mode() !== 'phone' || !S.cur || au.paused || !(au.duration > 15)) return;
+  if (fadeIv || mode() !== 'phone' || !S.cur || au.paused || !(au.duration > 15)) return;
   const left = au.duration - au.currentTime;
   if (left <= FADE_S && left > .05 && S.rep !== 'one') fadeSet(Math.pow(left / FADE_S, 1.4));
   else if (fadeM !== 1) fadeSet(1);
-}, 400);
+}, 150);   // v23.2: smaller steps so the 2 s fade-out is smooth, not stair-like
 au.addEventListener('play', () => { if (AX && AX.ctx.state === 'suspended') AX.ctx.resume().catch(() => {}) });
 document.addEventListener('visibilitychange', () => { if (AX && AX.ctx.state === 'suspended' && !au.paused) AX.ctx.resume().catch(() => {}) });
 if ('mediaSession' in navigator) {
@@ -798,7 +816,7 @@ const rowHtml = (t, attrs, on, extra = '') => { const id = ytId(t); return `<but
 const songRow = (name, i, t, extra = '') => rowHtml(t, `data-a="play" data-l="${name}" data-i="${i}"`, S.cur && S.cur.uri && S.cur.uri === t.uri, `<span class="d">${t.duration ? fmt(t.duration) : ''}</span>${extra}`);
 const moreBtn = (name, i) => `<span class="ib more" role="button" data-a="more" data-l="${name}" data-i="${i}" aria-label="More"><svg viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg></span>`;
 const songCards = (name, list) => `<div class="cards">${list.map((t, i) => `<button class="card" data-a="play" data-l="${name}" data-i="${i}"><span class="cv" style="${bgi(art(t))}"></span><span class="t">${esc(t.title)}</span><span class="s">${esc(t.author)}</span></button>`).join('')}</div>`;
-const plCards = (list, tag) => `<div class="cards">${list.map(p => `<button class="card" data-a="open-pl" data-code="${esc(p.code)}"><span class="cv" data-plcode="${plc(p.code)}" style="${bgi(fixUrl(p.cover_image_url) || '/static/pwa/icon-512.png')}">${tag && p._src ? `<i class="src ${p._src === 'App' ? 'app' : ''}">${p._src}</i>` : ''}${p.collab ? '<i class="src collab">Collab</i>' : ''}<b><svg viewBox="0 0 24 24">${PLAY}</svg></b></span><span class="t">${esc(p.name)}</span><span class="s">${p.owner_name ? esc(p.owner_name) + ' · ' : ''}${p.track_count || 0} songs</span></button>`).join('')}</div>`;
+const plCards = (list, tag) => `<div class="cards">${list.map(p => `<button class="card" data-a="open-pl" data-code="${esc(p.code)}"><span class="cv" data-plcode="${plc(p.code)}" style="${bgi(fixUrl(p.cover_image_url) || '/static/pwa/icon-512.png')}">${tag && p._src ? `<i class="src ${p._src === 'App' ? 'app' : ''}">${p._src}</i>` : ''}${p.collab ? '<i class="src collab">Collab</i>' : ''}${ptkImg(p)}<b><svg viewBox="0 0 24 24">${PLAY}</svg></b></span><span class="t">${esc(p.name)}</span><span class="s">${p.owner_name ? esc(p.owner_name) + ' · ' : ''}${p.track_count || 0} songs</span></button>`).join('')}</div>`;
 const skel = n => '<div class="sk"></div>'.repeat(n);
 /* Sheets own a history entry, so the phone's back button closes the sheet instead of leaving the page.
    closeSheet() pops that entry (async) - run anything that navigates afterwards through afterSheet(). */
@@ -823,7 +841,8 @@ function pickFile(inp) {   // opens the gallery; inside the APK, if nothing open
   let opened = false; const mark = () => { opened = true };
   window.addEventListener('blur', mark, { once: true }); document.addEventListener('visibilitychange', mark, { once: true });
   inp.click();
-  if (NAT) setTimeout(() => { window.removeEventListener('blur', mark); document.removeEventListener('visibilitychange', mark); if (!opened && !document.hidden) noPickerSheet() }, 2200);
+  const hasPicker = !!(bridge && typeof bridge.announce === 'function');   // new APK (v23.2+) has the native gallery picker
+  if (NAT && !hasPicker) setTimeout(() => { window.removeEventListener('blur', mark); document.removeEventListener('visibilitychange', mark); if (!opened && !document.hidden) noPickerSheet() }, 2200);
 }
 const dataBlob = d => { const b = atob(d.split(',')[1]), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return new Blob([u], { type: 'image/jpeg' }) };
 /* photo adjuster: drag to move, pinch / slider / mouse wheel to zoom, rotate. Returns a JPEG data-uri (or null if cancelled) */
@@ -1034,13 +1053,25 @@ async function loadNotifs(auto) {
           }
         } catch (e) {}
       });
+      if (seen.length && fresh.length && !document.hidden) annBanner(fresh[0]);   // not on the very first run (old messages) - only for really new ones
       store.set('lm-an-seen', JSON.stringify([...new Set([...seen, ...NT.map(m => String(m.id))])].slice(-120)));
     } catch (e) {}
     // v24.1: a new message never jumps in front of the user - it just lights the badge on the bell
   } catch (e) {}
 }
 let NTold = {};
-setInterval(() => { loadNotifs() }, 2 * 60000);
+/* v23.2: a new announcement slides in from the top of the app (tap = open it) */
+function annBanner(m) {
+  try {
+    const old = document.getElementById('annpop'); if (old) old.remove();
+    const d = document.createElement('div'); d.id = 'annpop';
+    d.innerHTML = `<img src="/static/pwa/icon-192.png" alt=""><div><b>${esc(m.title || 'Legacy Music')}</b><span>${esc(String(m.text || m.body || m.message || '').slice(0, 140))}</span></div>`;
+    d.onclick = () => { d.remove(); try { openNotifs() } catch (e) {} };
+    document.body.appendChild(d); requestAnimationFrame(() => d.classList.add('on'));
+    setTimeout(() => { d.classList.remove('on'); setTimeout(() => d.remove(), 350) }, 7000);
+  } catch (e) {}
+}
+setInterval(() => { loadNotifs() }, 60000);
 
 /* v23.2: the website needs permission before it can put a notification in the phone's bar.
    Ask once, on the very first tap (browsers refuse a silent request on page load). */
@@ -1068,7 +1099,7 @@ async function resolveSaved(codes, pool) {
   return out;
 }
 
-const aotw = (p, fb) => `<button class="aotw" data-a="open-pl" data-code="${esc(p.code)}"><span class="aw-cv" data-plcode="${plc(p.code)}" style="${bgi(fixUrl(p.cover_image_url) || '/static/pwa/icon-512.png')}"></span><span class="aw-tx"><em>${fb ? 'Top album' : 'Album of the week'}</em><b>${esc(p.name)}</b><small>${esc(p.owner_name || '')}${p.track_count ? ' · ' + p.track_count + ' songs' : ''}</small></span></button>`;
+const aotw = (p, fb) => `<button class="aotw" data-a="open-pl" data-code="${esc(p.code)}"><span class="aw-cv" data-plcode="${plc(p.code)}" style="${bgi(fixUrl(p.cover_image_url) || '/static/pwa/icon-512.png')}">${ptkImg(p)}</span><span class="aw-tx"><em>${fb ? 'Top album' : 'Album of the week'}</em><b>${esc(p.name)}</b><small>${esc(p.owner_name || '')}${p.track_count ? ' · ' + p.track_count + ' songs' : ''}</small></span></button>`;
 async function home() {
   const my = RT;
   view.innerHTML = `<h1>${greet()}, ${esc(S.me.username)}</h1><div id="h1">${skel(3)}</div>`;
@@ -1196,7 +1227,7 @@ async function library() {
   const codes = saved.status === 'fulfilled' ? saved.value.codes || [] : []; S.saved = new Set(codes);
   l.forEach(x => { S.liked[x.uri] = x.id });
   const sv = codes.length ? await resolveSaved(codes, []) : []; if (my !== RT) return;
-  const rowP = (x, sub, kind) => `<button class="row" data-a="open-pl" data-code="${esc(x.code)}"><span class="th" data-plcode="${plc(x.code)}" style="${bgi(fixUrl(x.cover_image_url) || '/static/pwa/icon-512.png')}"></span><span class="tx"><span class="t">${esc(x.name)}${x.collab ? ' ' + ic('users') : ''}${x.locked ? ' ' + ic('lock') : ''}</span><span class="s">${sub}</span></span><span class="ib more" role="button" data-a="pl-more" data-code="${esc(x.code)}" data-pid="${esc(x.id == null ? '' : x.id)}" data-kind="${kind}" data-name="${esc(x.name)}" data-n="${esc(String(x.track_count || 0))} songs" aria-label="More"><svg viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg></span></button>`;
+  const rowP = (x, sub, kind) => `<button class="row" data-a="open-pl" data-code="${esc(x.code)}"><span class="th" data-plcode="${plc(x.code)}" style="${bgi(fixUrl(x.cover_image_url) || '/static/pwa/icon-512.png')}">${ptkImg(x)}</span><span class="tx"><span class="t">${esc(x.name)}${x.collab ? ' ' + ic('users') : ''}${x.locked ? ' ' + ic('lock') : ''}</span><span class="s">${sub}</span></span><span class="ib more" role="button" data-a="pl-more" data-code="${esc(x.code)}" data-pid="${esc(x.id == null ? '' : x.id)}" data-kind="${kind}" data-name="${esc(x.name)}" data-n="${esc(String(x.track_count || 0))} songs" aria-label="More"><svg viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg></span></button>`;
   let h = `<button class="row" data-a="open-liked"><span class="th" style="background:linear-gradient(135deg,#7c5cff,#3b9dff);display:grid;place-items:center">${ic('heart', 'fill big')}</span><span class="tx"><span class="t">Liked songs</span><span class="s">${l.length} songs</span></span></button>`;
   h += `<button class="row" data-a="open-dl"><span class="th" style="background:linear-gradient(135deg,#10b981,#3b9dff);display:grid;place-items:center">${ic('dl', 'big')}</span><span class="tx"><span class="t">Downloads ${isPrem() ? '' : ic('crown', 'gold')}</span><span class="s">${d.length} songs · play without internet</span></span></button>`;
   h += p.map(x => rowP(x, `${x.track_count} songs · ${x.is_public && isPrem() ? 'Public' : 'Private'}${x.locked ? ' · 🔒' : ''}${x.collab ? ' · Collaborative' : ''}`, 'own')).join('');
@@ -1233,7 +1264,7 @@ function plArtApply() {
     const u = await plArtUrl(code, kind); if (u && el.dataset.pa === tag) el.style.backgroundImage = `url('${u}')`; else if (!u && el.dataset.pa === tag) delete el.dataset.pa;
   });
 }
-{ let t; new MutationObserver(() => { clearTimeout(t); t = setTimeout(plArtApply, 60) }).observe(view, { childList: true, subtree: true }) }
+{ let t; new MutationObserver(() => { clearTimeout(t); t = setTimeout(() => { plArtApply(); ptkApply() }, 60) }).observe(view, { childList: true, subtree: true }) }
 const imgResize = (file, w, h, q) => new Promise((res, rej) => {
   const u = URL.createObjectURL(file), im = new Image();
   im.onload = () => { const c = document.createElement('canvas'); c.width = w; c.height = h; const x = c.getContext('2d'), s = Math.max(w / im.width, h / im.height), dw = im.width * s, dh = im.height * s; x.drawImage(im, (w - dw) / 2, (h - dh) / 2, dw, dh); URL.revokeObjectURL(u); res(c.toDataURL('image/jpeg', q)) };
@@ -1320,8 +1351,8 @@ async function you() {
   <div class="box prem"><h3>${ic('crown', 'gold')} Premium</h3>${isPrem() ? '<span class="sub">You have Premium. Thank you!</span><div id="prem-exp" class="sub"></div>' : '<span class="sub">Create playlists, collaborative playlists, download songs and get the Premium tick.</span>'}
   <ul class="perks"><li>Create & edit playlists</li><li>Collaborative playlists with friends</li><li>Download songs, listen offline</li><li>Lock playlists, covers & banners</li><li>Unlimited liked songs</li><li>Premium tick next to your name</li><li>Public playlists stay public</li></ul>${isPrem() ? '' : '<div class="actions"><a class="btn" href="/premium">Get Premium</a></div>'}</div>
   <div class="box"><h3>Look & feel</h3><div class="seg" id="themes">${[['auto', 'Auto'], ['dark', 'Dark'], ['light', 'White'], ['amoled', 'AMOLED']].map(([k, n]) => `<button data-a="theme" data-k="${k}" class="${th === k ? 'on' : ''}">${n}</button>`).join('')}</div>
-    <div class="setrow" data-a="set-bass"><div>Bass boost<div class="sub">Deep, punchy bass. Off = natural bass of the song. Premium also gets cleaner sound</div></div>${sw(store.get('lm-bass') !== '0')}</div>
-    <div class="setrow" data-a="set-duck"><div>Auto volume (game mode)<div class="sub">Music drops to 35% when you switch to a game or another app, and comes back when you return. Never stops.</div></div>${sw(store.get('lm-duck') !== '0')}</div>
+    <div class="setrow" data-a="set-bass"><div>Bass boost<div class="sub">Deep, punchy bass. Off = natural bass of the song. Premium also gets cleaner sound</div></div>${sw(store.get('lm-bass') === '1')}</div>
+    <div class="setrow" data-a="set-duck"><div>Auto volume (game mode)<div class="sub">Music drops to 35% when you switch to a game or another app, and comes back when you return. Never stops.</div></div>${sw(store.get('lm-duck2') === '1')}</div>
     <div class="setrow" data-a="set-haptic"><div>Vibration feedback</div>${sw(S.haptic)}</div>
     <div class="setrow" data-a="set-ds"><div>Data saver<div class="sub">Lower sound quality and small covers = much less mobile data. Off = best quality.</div></div>${sw(dsOn())}</div>
     ${NAT ? `<div class="setrow" data-a="set-autoupd"><div>Auto-update<div class="sub">Download new versions by itself (you tap Install). Never while music plays.</div></div>${sw(store.get('lm-autoupd') !== '0')}</div>` : ''}</div>
@@ -1442,13 +1473,46 @@ const plTickKind = p => { const c = String(p.code || '').toUpperCase(); const m 
 /* v23.0: the creator's tick sits ON the creator's logo (top-right, like a verified badge) and the name follows.
    Before this the tick was printed outside, next to the name — that is what looked wrong.
    Whatever tick the account has (owner / admin / premium / official) is the one that shows. */
-const plCvTick = p => { const k = plTickKind(p); return (k && TICKS[k]) ? `<img class="cvtick" src="/static/badges/${TICKS[k]}" alt="${esc(k)}">` : '' };
+const plCvTick = p => { const k = plTickKind(p); return (k && TICKS[k]) ? `<img class="ptk" data-tk="${esc(k)}" src="/static/badges/${TICKS[k]}" alt="${esc(k)}">` : '' };
+/* v23.2: the same tick on EVERY playlist cover (home cards, Album of the week, lists, library, search ...) and a tap on ANY tick opens a small info popup. */
+const ptkImg = p => plCvTick(p);
+function ptkApply() {          // covers that were drawn without a tick: add it from the server's tick list
+  document.querySelectorAll('[data-plcode]').forEach(el => {
+    if (el.dataset.plkind === 'bg' || el.querySelector(':scope > img.ptk')) return;
+    const k = PTK.map[String(el.dataset.plcode || '').toUpperCase()];
+    if (k && TICKS[k]) el.insertAdjacentHTML('beforeend', `<img class="ptk" data-tk="${esc(k)}" src="/static/badges/${TICKS[k]}" alt="${esc(k)}">`);
+  });
+}
+const TKINFO = {
+  owner:    { t: 'Owner',    u: 'This is the owner of Legacy Music.',                     p: 'This playlist belongs to the owner of Legacy Music.' },
+  admin:    { t: 'Admin',    u: 'This account is a Legacy Music admin.',                  p: 'This playlist belongs to a Legacy Music admin.' },
+  premium:  { t: 'Premium',  u: 'This user has Legacy Music Premium.',                    p: 'This playlist was made by a Premium member.' },
+  official: { t: 'Official', u: 'This is an official Legacy Music account.',              p: 'This is an official Legacy Music playlist.' }
+};
+document.addEventListener('click', e => {
+  const old = document.getElementById('tkpop');
+  const t = e.target.closest && e.target.closest('img.tick, img.ptk');
+  if (!t) { if (old) old.remove(); return }
+  e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+  if (old) old.remove();
+  const k = t.dataset.tk || t.getAttribute('alt') || '', info = TKINFO[k]; if (!info) return;
+  const pop = document.createElement('div'); pop.id = 'tkpop';
+  pop.innerHTML = `<img src="${esc(t.getAttribute('src'))}" alt=""><div><b>${esc(info.t)}</b><span>${esc(t.classList.contains('ptk') ? info.p : info.u)}</span></div>`;
+  document.body.appendChild(pop);
+  const r = t.getBoundingClientRect(), w = pop.offsetWidth;
+  pop.style.left = Math.max(10, Math.min(innerWidth - w - 10, r.left + r.width / 2 - w / 2)) + 'px';
+  pop.style.top = Math.min(innerHeight - pop.offsetHeight - 10, r.bottom + 8) + 'px';
+  setTimeout(() => { const p = document.getElementById('tkpop'); if (p === pop) p.remove() }, 4500);
+}, true);
 const plOwnerLine = p => {
   const k = plTickKind(p), av = fixUrl(p.owner_avatar);
-  const logo = av ? `<span class="av sm" style="${bgi(av)}">${(k && TICKS[k]) ? `<img class="tick" src="/static/badges/${TICKS[k]}" alt="${esc(k)}">` : ''}</span>` : '';
+  const logo = av ? `<span class="av sm" style="${bgi(av)}">${(k && TICKS[k]) ? `<img class="tick" data-tk="${esc(k)}" src="/static/badges/${TICKS[k]}" alt="${esc(k)}">` : ''}</span>` : '';
   if (!p.owner_name && !av) return '';
-  const nameTick = (!av && k && TICKS[k]) ? `<img class="tick" src="/static/badges/${TICKS[k]}" alt="${esc(k)}">` : '';
-  return `<div class="plown">${logo}${nameTick}<span class="pn">${esc(p.owner_name || '')}</span>${p.views != null ? `<span class="sub">· ${fmtViews(p.views)} views</span>` : ''}</div>`;
+  const nameTick = (!av && k && TICKS[k]) ? `<img class="tick" data-tk="${esc(k)}" src="/static/badges/${TICKS[k]}" alt="${esc(k)}">` : '';
+  const mine = S.me && p.owner_id != null && String(p.owner_id) === String(S.me.id);
+  const un = String(p.owner_username || p.owner_handle || (mine ? S.me.handle : '') || '').replace(/^@/, '');
+  const nm = p.owner_display_name || p.owner_name || '';
+  return `<div class="plown">${logo}${nameTick}<div class="pwho"><span class="pn">${esc(nm)}</span>${un ? `<span class="un">@${esc(un)}</span>` : ''}</div>${p.views != null ? `<span class="sub">· ${fmtViews(p.views)} views</span>` : ''}</div>`;
 };
 
 /* ── playlist create / edit as its own full page ── */
@@ -1540,7 +1604,7 @@ const admErr = e => `<div class="notice">${e.status === 404 || e.status === 405 
 const anOptRows = (opts) => (opts && opts.length ? opts : ['', '']).map((v, i) => `<div class="an-opt"><span class="n">${i + 1}</span><input class="an-oi" maxlength="60" placeholder="Option ${i + 1}" value="${esc(v || '')}">${i > 1 ? '<button class="an-x" data-a="an-opt-del" data-i="' + i + '" aria-label="Remove">✕</button>' : ''}</div>`).join('');
 const anOptsRead = () => [...document.querySelectorAll('#an-opt-list .an-oi')].map(i => i.value.trim()).filter(Boolean);
 const anOptsPaint = () => { const l = $('#an-opt-list'); if (!l) return; ADM.anOpts = anOptsRead(); l.innerHTML = anOptRows(ADM.anOpts.length ? ADM.anOpts : ['', '']); };
-const admU = u => `<div class="row adm-u" data-uid="${esc(u.id)}"><span class="th av" style="border-radius:50%;${bgi(fixUrl(u.avatar) || '/static/pwa/icon-192.png')}">${tick(u.role)}</span><span class="tx"><span class="t">${esc(u.name || u.username || u.id)} <small class="sub">${roleName(u.role)}</small></span><span class="s">ID ${esc(u.id)}${u.joined ? ' · joined ' + esc(u.joined) : ''}${u.last_seen ? ' · seen ' + esc(u.last_seen) : ''}${u.premium_until ? ' · premium till ' + esc(u.premium_until) : ''}</span></span><button class="btn sm ghost" data-a="adm-user" data-uid="${esc(u.id)}" data-name="${esc(u.name || u.username || '')}" data-role="${esc(u.role || '')}">Manage</button></div>`;
+const admU = u => `<div class="row adm-u" data-uid="${esc(u.id)}"><span class="th av" style="border-radius:50%;${bgi(fixUrl(u.avatar) || '/static/pwa/icon-192.png')}">${tick(u.role)}</span><span class="tx"><span class="t">${esc(u.name || u.username || u.id)} <small class="sub">${roleName(u.role)}${u.via ? ' · ' + (u.via === 'google' ? 'Google' : 'Discord') : ''}</small></span><span class="s">${u.username ? '@' + esc(u.username) + ' · ' : ''}ID ${esc(u.id)}${u.bio ? ' · ' + esc(u.bio) : ''}${u.joined ? ' · joined ' + esc(u.joined) : ''}${u.last_seen ? ' · seen ' + esc(u.last_seen) : ''}${u.premium_until ? ' · premium till ' + esc(u.premium_until) : ''}</span></span><button class="btn sm ghost" data-a="adm-user" data-uid="${esc(u.id)}" data-name="${esc(u.name || u.username || '')}" data-role="${esc(u.role || '')}">Manage</button></div>`;
 async function adminPage(tab) {
   if (!S.cfg.is_staff) { location.hash = '#you'; return }
   ADM.tab = tab || ADM.tab; const my = RT, tabs = [['overview', 'Overview'], ['logins', 'Logins'], ['users', 'Users'], ['playlists', 'Playlists'], ['announce', 'Announce'], ['activity', 'Activity'], ['updates', 'Updates']];
@@ -1591,7 +1655,7 @@ async function adminPage(tab) {
   } catch (e) { if (e.status === 401) throw e; h = admErr(e) }
   if (my !== RT) return; $('#adm-body').innerHTML = h;
 }
-const admP = p => { const k = plTickKind(p); return `<div class="row adm-u"><span class="th" style="${bgi(fixUrl(p.cover) || fixUrl(p.cover_image_url) || '/static/pwa/icon-192.png')}"></span><span class="tx"><span class="t">${esc(p.name)} ${k ? tick(k) : ''}</span><span class="s">${esc(p.code)} · ${esc(p.owner_name || '')} · ${p.tracks != null ? p.tracks + ' songs · ' : ''}👁 ${fmtViews(p.views || 0)}${p.source ? ' · ' + esc(p.source) : ''}</span></span>${isOwner() ? `<button class="btn sm ghost" data-a="adm-pl" data-code="${esc(p.code)}">Manage</button>` : ''}</div>` };
+const admP = p => `<div class="row adm-u"><span class="th" data-plcode="${esc(p.code)}" style="${bgi(fixUrl(p.cover) || fixUrl(p.cover_image_url) || '/static/pwa/icon-192.png')}">${ptkImg(p)}</span><span class="tx"><span class="t">${esc(p.name)}</span><span class="s"><span class="oav" style="${bgi(fixUrl(p.owner_avatar) || '/static/pwa/icon-192.png')}"></span>${esc(p.owner_name || '')}${p.owner_role && TICKS[p.owner_role] ? ` <img class="otk" data-tk="${esc(p.owner_role)}" src="/static/badges/${TICKS[p.owner_role]}" alt="${esc(p.owner_role)}">` : ''} · ${esc(p.code)} · ${p.tracks != null ? p.tracks + ' songs · ' : ''}👁 ${fmtViews(p.views || 0)}${p.source ? ' · ' + esc(p.source) : ''}</span></span>${isOwner() ? `<button class="btn sm ghost" data-a="adm-pl" data-code="${esc(p.code)}">Manage</button>` : ''}</div>`;
 /* v23: upload your own emoji art for announcements (saved in static/emojis/) */
 const anEmojiFile = (() => {
   const i = document.createElement('input'); i.type = 'file'; i.accept = 'image/svg+xml,image/png,image/jpeg,image/webp,image/gif'; i.hidden = true; document.body.appendChild(i);
@@ -2073,8 +2137,8 @@ document.addEventListener('click', async e => {
   }
   else if (a === 'do-update') applyUpdate();
   else if (a === 'upd-later') { const u = $('#upd'); u.className = ''; u.innerHTML = updBanner(S.upd || {}) }
-  else if (a === 'set-bass') { const on = store.get('lm-bass') === '0'; store.set('lm-bass', on ? '1' : '0'); el.querySelector('.sw').classList.toggle('on', on); eqApply() }
-  else if (a === 'set-duck') { duckOn = !duckOn; store.set('lm-duck', duckOn ? '1' : '0'); el.querySelector('.sw').classList.toggle('on', duckOn); duckAuto(); toast(duckOn ? 'Auto volume ON - music dips when you play a game' : 'Auto volume OFF') }
+  else if (a === 'set-bass') { const on = store.get('lm-bass') !== '1'; store.set('lm-bass', on ? '1' : '0'); el.querySelector('.sw').classList.toggle('on', on); eqApply() }
+  else if (a === 'set-duck') { duckOn = !duckOn; store.set('lm-duck2', duckOn ? '1' : '0'); el.querySelector('.sw').classList.toggle('on', duckOn); duckAuto(); toast(duckOn ? 'Auto volume ON - music dips when you play a game' : 'Auto volume OFF') }
   else if (a === 'set-autoupd') { const on = store.get('lm-autoupd') === '0'; store.set('lm-autoupd', on ? '1' : '0'); el.querySelector('.sw').classList.toggle('on', on); if (on) checkUpdate() }
   else if (a === 'adm-back') { location.hash = '#you' }
   else if (a === 'adm-tab') { adminPage(el.dataset.k) }
@@ -2432,6 +2496,11 @@ async function epSave() {
   document.addEventListener('touchend', end, { passive: true });
   document.addEventListener('touchcancel', () => { on = false; set(0) }, { passive: true });
 })();
+
+/* v23.2: never leave a blank screen - if the app cannot start, show the reason (and a Retry button) instead */
+addEventListener('unhandledrejection', e => { try { if (!view.innerHTML.trim()) view.innerHTML = `<div class="empty">Could not load: ${esc((e.reason && e.reason.message) || e.reason || 'unknown error')}<br><br><button class="btn sm" onclick="location.reload()">Retry</button></div>` } catch (_) {} });
+addEventListener('error', e => { try { if (!view.innerHTML.trim()) view.innerHTML = `<div class="empty">Error: ${esc(e.message || 'unknown')}<br><br><button class="btn sm" onclick="location.reload()">Retry</button></div>` } catch (_) {} });
+setTimeout(() => { try { if (!view.innerHTML.trim()) view.innerHTML = '<div class="empty">Still loading… if this stays blank, tap Retry.<br><br><button class="btn sm" onclick="location.reload()">Retry</button></div>' } catch (_) {} }, 9000);
 
 /* ───────── start ───────── */
 (async () => {
