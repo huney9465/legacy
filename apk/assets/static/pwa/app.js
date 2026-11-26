@@ -47,6 +47,7 @@ const PLAY = '<path d="M7 4l13 8-13 8z"/>', PAUSE = '<path d="M6 4h4v16H6zM14 4h
 const S = { me: null, cfg: {}, queue: [], qi: -1, cur: null, playing: false, pos: 0, dur: 0, pl: null, gid: null, liked: {}, dl: {}, saved: new Set(),
   auto: true, rep: 'off', shuf: false, orig: null, ctx: '', chips: new Set(), offline: !navigator.onLine, haptic: store.get('lm-haptic') !== '0' };
 let RT = 0;
+let HEAVYK = '';   // v23.4: song for which cover / colour / lyrics / artist were already prepared for the screen
 
 /* ───────── theme (Auto / Dark / White / AMOLED) ───────── */
 function applyTheme() {
@@ -105,6 +106,22 @@ const artHi = t => dsOn() ? art(t) : ytId(t) ? `https://i.ytimg.com/vi/${ytId(t)
 const fixUrl = u => { if (!u || u === 'null' || u === 'undefined') return null; u = noMt(String(u).trim()); if (!u) return null; if (/^(data:|blob:)/i.test(u)) return u; if (/^https?:/i.test(u)) return withMt(u); if (u.startsWith('//')) return withMt(location.protocol + u); return withMt((NAT || location.origin) + (u.startsWith('/') ? '' : '/') + u) };
 const buzz = n => { if (S.haptic && navigator.vibrate) navigator.vibrate(n || 12) };
 let tm; const toast = m => { const e = $('#toast'); e.textContent = m; e.classList.add('on'); clearTimeout(tm); tm = setTimeout(() => e.classList.remove('on'), 3200) };
+/* v23.4: network status strip at the bottom (like YouTube / Chrome): "You are now offline" stays while there is no internet,
+   "You are now online" (green) shows for a moment when it comes back, then the strip slides away. Text only, no icons. */
+const NETBAR = { el: null, t: 0, off: false };
+function netBar(online) {
+  try {
+    if (online && !NETBAR.off) return;   // never say "online" unless we showed "offline" before
+    if (!NETBAR.el) { const d = document.createElement('div'); d.id = 'netbar'; d.setAttribute('role', 'status'); document.body.appendChild(d); NETBAR.el = d }
+    const d = NETBAR.el, root = document.documentElement; clearTimeout(NETBAR.t);
+    d.textContent = online ? 'You are now online' : 'You are now offline';
+    d.classList.toggle('ok', !!online); d.classList.add('on'); root.classList.add('netbar-on');
+    NETBAR.off = !online;
+    if (online) NETBAR.t = setTimeout(() => { d.classList.remove('on'); root.classList.remove('netbar-on') }, 2800);
+  } catch (e) {}
+}
+if (!navigator.onLine) netBar(false);   // app opened without internet
+document.addEventListener('visibilitychange', () => { if (document.hidden) return; if (!navigator.onLine) netBar(false); else if (NETBAR.off) netBar(true) });   // internet changed while the app was in the background
 const isNet = e => e instanceof TypeError || !navigator.onLine;
 
 async function api(p, o = {}) {
@@ -386,7 +403,7 @@ function swapIn(b) {
 /* v24.3: remember the song that was playing. After the app is closed and opened again it is shown (paused, at the same second) - it never starts by itself */
 const SAVE_K = 'lm-last'; let lastSave = 0;
 function saveLast(force) {
-  if (!S.cur || mode() !== 'phone') return; const n = Date.now(); if (!force && n - lastSave < 3000) return; lastSave = n;
+  if (!S.cur || mode() !== 'phone') return; const n = Date.now(); if (!force && n - lastSave < (document.hidden ? 20000 : 3000)) return; lastSave = n;
   try { const pos = au.readyState > 0 ? Math.floor(au.currentTime || 0) : (S.rp || 0); store.set(SAVE_K, JSON.stringify({ cur: S.cur, q: S.queue.slice(Math.max(0, S.qi), S.qi + 40), pos, hb: HB.slice(-30) })) } catch (e) {}
 }
 addEventListener('pagehide', () => saveLast(true));
@@ -592,7 +609,8 @@ au.addEventListener('loadedmetadata', () => { mpos(true); nativeSync(true) });
 au.addEventListener('seeked', () => { mpos(true); nativeSync(true) });
 au.addEventListener('ended', () => act.next(true));
 au.addEventListener('timeupdate', () => {
-  if (!document.hidden) ui(true); mpos(); saveLast();
+  if (!document.hidden) { ui(true); mpos() }   // v23.4: in the background the 5 s watchdog below keeps the OS card in sync
+  saveLast();
   if (navigator.onLine && Date.now() - lastWarmChk > 4000) { lastWarmChk = Date.now(); if (S.queue.length - S.qi <= 4) moreLikeThis(); warmAhead(); preloadNext() }
 });
 
@@ -844,11 +862,14 @@ function ui(light) {
   if ($('#mini-t').dataset.k !== mkey) {
     $('#mini-t').dataset.k = mkey;
     $('#mini-t').textContent = t.title; $('#mini-s').textContent = t.author;
-    $('#mini-art').src = art(t); $('#np-art').src = artHi(t);
+    $('#mini-art').src = art(t); if (!document.hidden) $('#np-art').src = artHi(t);   // v23.4: big cover is for the Now Playing screen only
     $('#np-t').textContent = t.title; $('#np-s').textContent = t.author;
-    setLikeIcon(false); tintFor(t); lyricsLoad(t); artistCard(t); miniLike(); panHead(); PAN.rel = ''; if (PAN.open && PAN.tab === 'rel') relLoad();
+    setLikeIcon(false); if (!document.hidden) { tintFor(t); lyricsLoad(t); artistCard(t); HEAVYK = mkey } miniLike(); panHead(); PAN.rel = ''; if (PAN.open && PAN.tab === 'rel') relLoad();
     if (!light && !document.hidden) document.querySelectorAll('.row.on').forEach(r => r.classList.remove('on'));
   }
+  /* v23.4: a song changed while the app was in the background (game / screen off): the big cover, cover colour, lyrics and artist card
+     (image decoding + network) were skipped to keep the phone free. They are prepared here, the moment the app is visible again. */
+  if (!document.hidden && HEAVYK !== mkey) { HEAVYK = mkey; $('#np-art').src = artHi(t); tintFor(t); lyricsLoad(t); artistCard(t) }
   if (_pp !== pl) { _pp = pl; const pp = pl ? PAUSE : PLAY; $('#mini-pp').innerHTML = pp; $('#np-pp').innerHTML = pp; $('#pan-pp').innerHTML = pp }
   if (document.hidden) { nativeSync(); return }      // v23: no heavy screen work while the phone is locked (one full refresh runs the moment it wakes up) -> no lag
   const pos = phone ? au.currentTime * 1000 : S.pos, dur = phone ? ((isFinite(au.duration) && au.duration > 0) ? au.duration * 1000 : t.duration) : S.dur;
@@ -1863,8 +1884,8 @@ function routeNow() {
   ({ home, search, library, you, downloads, admin: () => adminPage(b), plnew: () => plForm('new'), plcollab: () => plForm('collab'), pledit: () => plForm('edit', b) }[a] || (a === 'code' ? () => playlist(b) : a === 'artist' ? () => artistPage((() => { try { return decodeURIComponent(b || '') } catch (e) { return b || '' } })()) : home))();
 }
 addEventListener('hashchange', route);
-addEventListener('offline', () => { S.offline = true; toast("You're offline. Downloaded songs still play."); if (!location.hash || location.hash === '#home') route() });
-addEventListener('online', () => { S.offline = false; toast("You're back online"); checkUpdate() });
+addEventListener('offline', () => { S.offline = true; netBar(false); if (!location.hash || location.hash === '#home') route() });
+addEventListener('online', () => { S.offline = false; netBar(true); checkUpdate() });
 const likeToggle = async t => {
   try {
     if (S.liked[t.uri]) { await api('/api/liked-songs/' + S.liked[t.uri], { method: 'DELETE' }); delete S.liked[t.uri]; ev('unlike', { ref: t.uri, title: t.title, author: t.author }); toast('Removed from Liked songs') }
