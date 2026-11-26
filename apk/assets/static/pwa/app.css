@@ -678,3 +678,43 @@ html::-webkit-scrollbar,body::-webkit-scrollbar,*::-webkit-scrollbar{width:0!imp
 #ptr i{display:block;width:18px;height:18px;border-radius:50%;border:2.5px solid var(--accent,#7c5cff);border-top-color:transparent}
 #ptr.spin i{animation:ptrspin .7s linear infinite!important}
 @keyframes ptrspin{to{transform:rotate(360deg)}}
+
+
+/* ===== v23.2: playlist ticks on every cover + tick info popup ===== */
+.ptk{position:absolute;right:6px;top:6px;left:auto;bottom:auto;width:26px;height:26px;min-width:0;max-width:none;margin:0;border-radius:50%;object-fit:contain;background:var(--bg,#0b0c10);box-shadow:0 0 0 2px var(--bg,#0b0c10);z-index:5;cursor:pointer}
+.card .cv .ptk{width:24px;height:24px}
+.row .th{position:relative}
+.row .th .ptk{width:18px;height:18px;right:3px;top:3px;box-shadow:0 0 0 1.5px var(--bg,#0b0c10)}
+.aotw .aw-cv{position:relative}
+.aotw .aw-cv .ptk{width:28px;height:28px;right:8px;top:8px}
+.hero .cv{position:relative}
+.hero .cv .ptk{width:32px;height:32px;right:8px;top:8px}
+/* the tick on a round logo sits ON the rim at the top-right (same everywhere) */
+.av .tick,.top .av .tick,.plown .av.sm .tick,.adm-u .th.av .tick,.row .th.av .tick{position:absolute!important;right:-7%!important;top:-7%!important;left:auto!important;bottom:auto!important;width:42%!important;height:42%!important;min-width:14px!important;max-width:none!important;cursor:pointer}
+.plown .pwho{display:flex;flex-direction:column;min-width:0;line-height:1.15}
+.plown .pwho .pn{font-size:14.5px;font-weight:700}
+.plown .pwho .un{font-size:11px;font-weight:500;color:var(--mu);opacity:.9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#tkpop{position:fixed;z-index:9999;max-width:260px;display:flex;gap:10px;align-items:center;padding:10px 13px;border-radius:14px;background:var(--s2,#1c1d24);color:var(--tx,#fff);box-shadow:0 8px 28px rgba(0,0,0,.5);border:1px solid rgba(255,255,255,.1);font-size:12.5px;line-height:1.35}
+#tkpop img{width:26px;height:26px;flex:none;object-fit:contain}
+#tkpop b{display:block;font-size:13.5px;margin-bottom:1px}
+#tkpop span{display:block;opacity:.85}
+
+/* ===== v23.2: announcement popup (top of the app) + admin owner logo ===== */
+#annpop{position:fixed;left:10px;right:10px;top:calc(env(safe-area-inset-top,0px) + 8px);z-index:9998;display:flex;gap:11px;align-items:center;padding:11px 14px;border-radius:16px;background:var(--s2,#1c1d24);color:var(--tx,#fff);box-shadow:0 10px 30px rgba(0,0,0,.5);border:1px solid rgba(255,255,255,.1);transform:translateY(-130%);transition:transform .3s ease;cursor:pointer}
+#annpop.on{transform:none}
+#annpop img{width:34px;height:34px;border-radius:9px;flex:none}
+#annpop b{display:block;font-size:13.5px}
+#annpop span{display:block;font-size:12.5px;opacity:.85;line-height:1.3}
+.oav{display:inline-block;width:16px;height:16px;border-radius:50%;background-size:cover;background-position:center;vertical-align:-3px;margin-right:5px}
+.otk{width:13px;height:13px;vertical-align:-2px;margin-left:2px}
+
+/* ===== v23.2: mini player animation ===== */
+#mini:not([hidden]){animation:miniUp .45s cubic-bezier(.16,1,.3,1) both}
+@keyframes miniUp{from{transform:translateY(24px);opacity:0}to{transform:none;opacity:1}}
+#mini .bar{overflow:visible}
+#mini .bar i{transition:width .5s linear}
+#mini .bar #mini-bar{position:relative;border-radius:2px;box-shadow:0 0 6px rgba(255,255,255,.45)}
+#mini .bar #mini-bar::after{content:"";position:absolute;right:-3px;top:50%;width:7px;height:7px;margin-top:-3.5px;border-radius:50%;background:#fff;box-shadow:0 0 8px rgba(255,255,255,.85);animation:miniDot 1.6s ease-in-out infinite}
+@keyframes miniDot{0%,100%{transform:scale(.8);opacity:.85}50%{transform:scale(1.25);opacity:1}}
+html.bgd #mini .bar #mini-bar::after{animation:none}
+@media (prefers-reduced-motion:reduce){#mini:not([hidden]),#mini .bar #mini-bar::after{animation:none!important}}
