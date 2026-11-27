@@ -1,4 +1,13 @@
-/* Legacy Music app (v23.7 = v23.6 + chunk cache). Installed app = plays in the phone. Website = plays in the Discord voice channel.
+/* v25.7: fewer requests = less lag: 2 requests per next song (head + rest), cache pieces >= 32 KB, one write round per second in the background.
+   v25.6: CHUNKS RUN AHEAD, THE SONG FOLLOWS. Chunk size / lead are auto-detected all the time from the real network speed, RAM (deviceMemory, JS heap) and
+   saveData (adp()). Next song: nothing while the song plays; ~4 s before the end only a small HEAD piece (30-100 KB), the rest in small Range pieces
+   one at a time (bigger only when little time is left). Chunk writes pause while the next song comes in (never together). Now Playing: the line behind
+   the dot, the dot and the mini bar take a light tint of the cover colour (--np-prog).
+   v25.5: no lag while you scroll (song pieces are saved only when the finger is still), the cover changes only when the next song really plays,
+   next song starts faster, real ALBUMS (search / artist page / album page), artist name tap on Now Playing, big download arrow with a ring, Following in Library,
+   new-release notifications of followed artists, playlist songs no longer listed in Downloads, tick on downloaded playlists.
+   v25.4: next song downloads when ~4 s of this one are left (PRE_AT); the played song is saved to the phone in tiny 8 KB pieces, slowly (CC_CH, CC_BG_GAP).
+   Legacy Music app (v23.7 = v23.6 + chunk cache). Installed app = plays in the phone. Website = plays in the Discord voice channel.
    v20: previous button, autoplay, lock-screen / notification-shade controls (Media Session), offline downloads (Premium),
         saved playlists, themes (Auto / Dark / White / AMOLED), update checker, sleep timer, repeat / shuffle, smarter search.
    v21: recently played row (songs + playlists), collaborative playlists (Premium, invite-link based),
@@ -144,6 +153,12 @@ const dlMeta = () => idbTx('meta', 'readonly', s => s.getAll()).catch(() => []);
 /* v24.2: per-song download ring (fills while downloading) -> tick when done; downloaded playlists list */
 const DLP = {};   // song id -> percent while it downloads (-1 = size unknown, spins)
 const DL_TICK = '<svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg>';
+/* v25.5: songs the person downloaded ONE BY ONE (lm-dlsolo). Songs that came only with a downloaded playlist stay inside that playlist and are not listed in Downloads. */
+const soloGet = () => { try { return new Set(JSON.parse(store.get('lm-dlsolo') || '[]')) } catch (e) { return new Set() } };
+const soloAdd = id => { const s = soloGet(); if (s.has(id)) return; s.add(id); try { store.set('lm-dlsolo', JSON.stringify([...s])) } catch (e) {} };
+const soloDel = id => { const s = soloGet(); if (!s.delete(id)) return; try { store.set('lm-dlsolo', JSON.stringify([...s])) } catch (e) {} };
+const inDlPl = id => { try { return dlPlGet().some(p => (p.ids || []).includes(id)) } catch (e) { return false } };
+const plDl = code => { try { const k = dlPlKey(code); return dlPlGet().some(p => p.code === k) } catch (e) { return false } };
 const dlMark = id => !id ? '' : S.dl[id] ? `<span class="dl-ok">${DL_TICK}</span>` : (id in DLP ? `<span class="dl-ring${DLP[id] < 0 ? ' ind' : ''}" style="--p:${Math.max(0, DLP[id])}"></span>` : '');
 const dlSlot = id => { delete DLPAINT[id]; try { document.querySelectorAll('.dl-slot').forEach(s => { if (s.dataset.dlid === id) s.innerHTML = dlMark(id) }) } catch (e) {} };
 const DLPAINT = {};   // v24.6 lag fix: last % painted per song
@@ -224,12 +239,12 @@ async function dlPlOffline(rec) {
 }
 async function dlSong(t, quiet, pl) {
   const id = ytId(t); if (!id) { if (!quiet) toast("This song can't be downloaded"); return false }
-  if (S.dl[id]) { if (!quiet) toast('Already downloaded'); return true }
+  if (S.dl[id]) { if (!pl && !quiet) soloAdd(id); if (!quiet) toast('Already downloaded'); return true }
   if (!isPrem()) { premiumSheet('Downloading songs to listen offline is a Premium feature.'); return false }
   if (!navigator.onLine) { toast("You're offline"); return false }
   if (DLJ[id]) return null;   // already downloading
   const J = DLJ[id] = { ctl: null, paused: false, cancelled: false, pl: pl || '' };
-  const b = $('#np-dl'); b && b.classList.add('busy'); if (!quiet) toast('Downloading…'); dlProg(id, 0);
+  const b = (S.cur && ytId(S.cur) === id) ? $('#np-dl') : null; b && b.classList.add('busy'); if (!quiet) toast('Downloading…'); dlProg(id, 0);
   try {
     let blob = null;
     for (let at = 0; at < 2 && !blob; at++) {
@@ -251,12 +266,12 @@ async function dlSong(t, quiet, pl) {
     if (J.cancelled) return null;
     await idbTx('songs', 'readwrite', s => s.put({ id, blob }));
     await idbTx('meta', 'readwrite', s => s.put({ id, title: t.title, author: t.author, thumbnail: art(t), duration: t.duration, size: blob.size, ts: Date.now(), uri: t.uri || `https://www.youtube.com/watch?v=${id}` }));
-    delete DLP[id]; S.dl[id] = 1; dlSlot(id); ev('download', { ref: t.uri || id, title: t.title, author: t.author }); if (!quiet) toast('Downloaded · plays offline'); buzz(); try { navigator.storage && navigator.storage.persist && navigator.storage.persist() } catch (e) {}
+    if (!pl && !quiet) soloAdd(id); delete DLP[id]; S.dl[id] = 1; dlSlot(id); ev('download', { ref: t.uri || id, title: t.title, author: t.author }); if (!quiet) toast('Downloaded · plays offline'); buzz(); try { navigator.storage && navigator.storage.persist && navigator.storage.persist() } catch (e) {}
     return true;
   } catch (e) { if (J.cancelled) return null; if (!quiet) toast(e.message || 'Download failed'); return false }
   finally { delete DLJ[id]; b && b.classList.remove('busy'); if (id in DLP) { delete DLP[id]; dlSlot(id) } ui() }
 }
-async function dlRemove(id) { ev('dl_rm', { ref: id }); await idbTx('songs', 'readwrite', s => s.delete(id)); await idbTx('meta', 'readwrite', s => s.delete(id)); delete S.dl[id] }
+async function dlRemove(id) { soloDel(id); ev('dl_rm', { ref: id }); await idbTx('songs', 'readwrite', s => s.delete(id)); await idbTx('meta', 'readwrite', s => s.delete(id)); delete S.dl[id] }
 
 /* ───────── everything the app does is saved on the server ───────── */
 // Events go into a small queue (kept when offline) and are sent in batches to /api/app/events. The server builds Recently played,
@@ -391,7 +406,18 @@ document.addEventListener('pointerdown', e => {
 }, true);
 /* v23.4: next-song preload. Only when the CURRENT song is fully loaded, the NEXT song (just one) is downloaded once into memory.
    When it starts it plays from memory = instant start, no second download. A skip / queue change cancels it. */
-const PRE = { key: '', url: '', busy: '', ctl: null };
+const PRE = { key: '', url: '', busy: '', ctl: null, sched: 0 };
+let ALB_NEXT = false, ALB_Q = null;   // v25.5: an album was started -> ONLY its songs play (no autoplay songs from outside)
+const albOnly = () => !!ALB_Q && S.queue === ALB_Q;
+let HOLD_T = 0, PRE_EARLY = 0;   // v25.5: HOLD_T = a next / previous was pressed: the screen keeps the old song until the new one really plays
+const holdUi = () => !!HOLD_T && Date.now() - HOLD_T < 2500;
+function holdStart() { HOLD_T = Date.now(); setTimeout(() => { if (HOLD_T && Date.now() - HOLD_T >= 2500) { HOLD_T = 0; try { ui() } catch (e) {} } }, 2600) }
+const PRE_AT = 4;   // v25.4: the NEXT song starts downloading when this many seconds of the current song are left
+function preSchedule() {   // v25.4: called from timeupdate; fires preloadNext() at ~PRE_AT s left even if the background wakes us only every few seconds
+  if (PRE.sched || PRE.busy || !(au.duration > 0) || !isFinite(au.duration)) return;
+  const rem = au.duration - au.currentTime; if (rem > PRE_AT + 7 || rem <= 0) return;
+  const my = PT; PRE.sched = setTimeout(() => { PRE.sched = 0; if (my === PT) preloadNext() }, Math.max(0, (rem - PRE_AT) * 1000));
+}
 const preKey = t => t && (ytId(t) || t.uri || '');
 function preDrop() { try { PRE.ctl && PRE.ctl.abort() } catch (e) {} PRE.ctl = null; PRE.busy = ''; if (PRE.url) { try { URL.revokeObjectURL(PRE.url) } catch (e) {} } PRE.url = ''; PRE.key = '' }
 function fullyLoaded() {
@@ -422,27 +448,73 @@ async function trickleFetch(url, signal, stale) {
   }
   return new Blob(parts, { type });
 }
+/* v25.6 AUTO-DETECT. Looked up again before every piece, so the chunk size follows the phone and the network while the app runs:
+     speed  = measured speed of the last downloads (netNote), else navigator.connection.downlink, else 400 KB/s
+     memory = navigator.deviceMemory (RAM) and the JS heap (performance.memory); a busy / small phone gets smaller pieces and fewer writes
+   ch   = piece size 10-100 KB (about 60 ms of data); head = bigger first piece (30-100 KB); lead = seconds the pieces run ahead of the song (1.5 / 2 / 4) */
+let NETBPS = 0;
+const netNote = (bytes, ms) => { if (bytes < 8000 || ms < 15) return; const v = bytes / ms * 1000; NETBPS = NETBPS ? NETBPS * .6 + v * .4 : v };
+function adp() {
+  const c = navigator.connection || {}, mem = +navigator.deviceMemory || 4;
+  const bw = NETBPS || (c.downlink > 0 ? c.downlink * 125000 : 0) || 400000;
+  const slow = bw < 190000 || !!c.saveData || /^(slow-2g|2g)$/.test(c.effectiveType || '');
+  let ch = bw * .06, low = mem <= 1;
+  ch *= mem <= 1 ? .5 : mem <= 2 ? .75 : mem >= 6 ? 1.5 : 1;
+  try { const pm = performance.memory; if (pm && pm.jsHeapSizeLimit && pm.usedJSHeapSize / pm.jsHeapSizeLimit > .72) { ch *= .5; low = true } } catch (e) {}
+  ch = Math.round(Math.max(32768, Math.min(102400, ch)) / 1024) * 1024;   // v25.7: pieces never smaller than 32 KB = fewer writes (less lag)
+  return { ch, head: Math.min(102400, Math.max(65536, ch * 2)), lead: slow ? 4 : bw > 1250000 ? 1.5 : 2, slow, low, bw, max: (mem <= 2 ? 100 : mem <= 4 ? 150 : 250) * 1048576 };
+}
+const leftSec = n => S.cur === n ? 0 : ((au.duration > 0 && isFinite(au.duration)) ? Math.max(0, au.duration - au.currentTime) : 9999);
+const sleepMs = ms => new Promise(r => setTimeout(r, ms));
+/* The next song in small Range pieces, ONE request at a time (never parallel):
+     1st piece = the head (also tells the size and 'wakes' the server / connection),
+     then pieces of ch bytes; when little time is left before the current song ends the pieces grow (max 256 KB) so it is ready on time.
+   While there is plenty of time (and the app is in front) it simply waits - nothing runs next to the song.
+   A server without Range support answers 200 with the whole file: that is used as it is (the old way). */
+async function rangeLoad(url, sig, live, n, early) {
+  const o = { credentials: NAT ? 'omit' : 'same-origin', signal: sig };
+  const parts = []; let pos = 0, total = 0, type = '', polls = 0;
+  const cut = r => { try { r.body && r.body.cancel() } catch (e) {} };
+  while (true) {
+    if (!live()) return null;
+    const A = adp(), first = pos === 0;
+    if (!first) {   // v25.7: only 2 requests per song: the head, then ALL the rest in one open-ended request (started when the time is right)
+      const eta = (total - pos) / Math.max(60000, NETBPS || A.bw), rem = leftSec(n);
+      if (rem >= eta * 1.6 + 1.2 && !early && !document.hidden && ++polls < 40) { await sleepMs(250); continue }
+    }
+    const r = await fetch(url, { ...o, headers: { Range: 'bytes=' + pos + '-' + (first ? pos + A.head - 1 : '') } });
+    const t0 = performance.now();
+    if (r.status === 200 && first) { const b = await r.blob(); netNote(b.size, performance.now() - t0); return b }
+    if (r.status !== 206) { cut(r); return null }
+    const m = /bytes\s+(\d+)-\d+\/(\d+)\s*$/.exec(r.headers.get('Content-Range') || '');
+    if (!m || +m[1] !== pos) { cut(r); return null }
+    total = +m[2]; if (total > CC_ONE) { cut(r); return null }
+    if (!type) type = r.headers.get('Content-Type') || 'audio/mp4';
+    const b = await r.blob(); if (!b.size) return null;
+    netNote(b.size, performance.now() - t0); parts.push(b); pos += b.size;
+    if (pos >= total) break;
+  }
+  return new Blob(parts, { type });
+}
 async function preloadNext() {
   if (PRE.busy || mode() !== 'phone' || !S.cur || !navigator.onLine || document.hidden && au.paused) return;
   const c = navigator.connection; if (c && c.saveData) return;
   const n = S.queue[S.qi + 1]; if (!n) return;
   const key = preKey(n); if (!key || PRE.key === key || (ytId(n) && S.dl[ytId(n)])) return;
-  /* v25.2 SMOOTH FIX: the old trickle (10 KB piece every 0.6-3 s for the WHOLE song = hundreds of requests + timers) kept the CPU/network busy all the time and
-     made the sound stutter on 2-8 GB phones, most of all when the app went to the background. Now: NOTHING during the song, ONE single request in its last 60 s. */
-  { const rem = (au.duration > 0 && isFinite(au.duration)) ? au.duration - au.currentTime : 9999; if (rem > 60 || !(au.currentTime >= 4)) return }
-  const my = PT; PRE.busy = key; PRE.ctl = new AbortController();
+  /* v25.2: NOTHING during the song. v25.6: ~4 s before the end only the head + small pieces (see rangeLoad), not one big download. */
+  { const rem = (au.duration > 0 && isFinite(au.duration)) ? au.duration - au.currentTime : 9999; if (PRE_EARLY !== PT && (rem > PRE_AT + 2 || !(au.currentTime >= 4))) return }
+  const my = PT, early = PRE_EARLY === PT, ctl = new AbortController(); PRE.busy = key; PRE.ctl = ctl;
+  /* still wanted: it is still the next song, OR it has just become the current one (the boundary came while its pieces were still coming - they are kept, not restarted) */
+  const live = () => !ctl.signal.aborted && ((my === PT && S.queue[S.qi + 1] === n) || S.cur === n);
   try {
-    const nu = streamUrl(n); let b = await ccGet(nu);   // v23.7: the saved chunks first
-    if (my !== PT || S.queue[S.qi + 1] !== n) throw 0;   // v25.2: no trickle any more - one single download (below)
-    if (!b) {
-      const r = await fetch(nu, { credentials: NAT ? 'omit' : 'same-origin', signal: PRE.ctl.signal });
-      if (!r.ok) throw 0;
-      b = await r.blob(); if (b && b.size >= 50000) ccPut(nu, b);
-    }
-    if (my !== PT || S.queue[S.qi + 1] !== n || b.size < 50000 || !/^(audio|video)\/|octet/.test(b.type || 'audio/')) throw 0;
+    const nu = streamUrl(n); let b = await ccGet(nu), net = false;   // v23.7: the saved chunks first
+    if (!live()) throw 0;
+    if (!b) { b = await rangeLoad(nu, ctl.signal, live, n, early); net = true }
+    if (!live() || !b || b.size < 50000 || !/^(audio|video)\/|octet/.test(b.type || 'audio/')) throw 0;
+    if (net) ccPut(nu, b);
     if (PRE.url) { try { URL.revokeObjectURL(PRE.url) } catch (e) {} }
     PRE.url = URL.createObjectURL(b); PRE.key = key;
-  } catch (e) {} finally { PRE.busy = ''; PRE.ctl = null }
+  } catch (e) {} finally { if (PRE.ctl === ctl) { PRE.busy = ''; PRE.ctl = null } }
 }
 
 /* ── v23.1: Android 16 media controls ────────────────────────────────────────────────────────────────
@@ -488,23 +560,29 @@ const HB = [];
    or the screen being off cannot make it stutter (a normal <audio> stream stops loading in the background = the stuttering).
    Very slow network (> LOAD_WAIT) -> it starts streaming at once and is swapped to the memory copy as soon as that is complete. */
 const LOAD_WAIT = 3000, CURP = { my: 0, p: null, ctl: null };
-/* v23.7: CHUNK CACHE (online only). Every song that is played is also kept on the phone in small pieces (64 KB chunks since v25.1, Cache Storage).
+/* v23.7: CHUNK CACHE (online only). Every song that is played is also kept on the phone in small pieces (10-100 KB chunks, size auto-detected since v25.6, Cache Storage).
    The next time the same song is played it is built from those pieces = it starts at once and needs (almost) no network - it can not stop or stutter.
    It is NOT a download: it is not shown in Downloads, it is not available offline (offline still plays only real downloads), and the oldest songs
    are removed by themselves when the cache is over CC_MAX. Writing is slow and in the background, and waits until the song is really playing. */
-const CC_NAME = 'lm-chunks-v1', CC_CH = 65536, CC_MAX = 150 * 1024 * 1024, CC_IDX = 'lm-cc-idx', CC_ONE = 40 * 1024 * 1024;
+const CC_NAME = 'lm-chunks-v1', CC_IDX = 'lm-cc-idx', CC_ONE = 40 * 1024 * 1024;   // v25.6: piece size, lead and the cache size limit now come from adp() (auto-detected)
 const ccKey = url => { try { const u = new URL(url, location.href), g = k => u.searchParams.get(k) || ''; return (g('v') ? 'v:' + g('v') : 'q:' + g('q')) + '|hq' + g('hq') + '|ds' + g('ds') } catch (e) { return '' } };
 const ccIdx = () => { try { const o = JSON.parse(store.get(CC_IDX) || '{}'); return o && typeof o === 'object' ? o : {} } catch (e) { return {} } };
 const ccSave = o => { try { store.set(CC_IDX, JSON.stringify(o)) } catch (e) {} };
 const ccUrl = (key, i) => '/__lmc/' + encodeURIComponent(key) + '/' + i;
 const ccBusy = new Set();
+/* v25.5: the phone is busiest while the finger moves. Song pieces are written only when nothing was touched / scrolled for 0.7 s. */
+let LASTMOVE = 0; ['touchmove', 'scroll', 'wheel'].forEach(n_ => addEventListener(n_, () => { LASTMOVE = Date.now() }, { passive: true, capture: true }));
+const idleMove = async () => { for (let i = 0; i < 400 && Date.now() - LASTMOVE < 700 && !document.hidden; i++) await new Promise(r => setTimeout(r, 200)) };
 async function ccDelete(cache, key, n) { for (let i = 0; i < n; i++) { try { await cache.delete(ccUrl(key, i)) } catch (e) {} } }
 async function ccGet(url) {
   try {
     if (!window.caches) return null; const key = ccKey(url); if (!key) return null;
     const idx = ccIdx(), e = idx[key]; if (!e || !e.n) return null;
     const cache = await caches.open(CC_NAME), parts = [];
-    for (let i = 0; i < e.n; i++) { const r = await cache.match(ccUrl(key, i)); if (!r) { delete idx[key]; ccSave(idx); ccDelete(cache, key, e.n); return null } parts.push(await r.blob()) }
+    for (let i0 = 0; i0 < e.n; i0 += 64) {   // v25.4: small chunks are read 64 at a time (fast start)
+      const rs = await Promise.all(Array.from({ length: Math.min(64, e.n - i0) }, (_, j) => cache.match(ccUrl(key, i0 + j))));
+      for (const r of rs) { if (!r) { delete idx[key]; ccSave(idx); ccDelete(cache, key, e.n); return null } parts.push(await r.blob()) }
+    }
     const b = new Blob(parts, { type: e.type || 'audio/mp4' });
     if (b.size !== e.size) { delete idx[key]; ccSave(idx); ccDelete(cache, key, e.n); return null }
     e.t = Date.now(); idx[key] = e; ccSave(idx); return b;
@@ -512,22 +590,37 @@ async function ccGet(url) {
 }
 async function ccPut(url, b) {
   try {
-    if (document.hidden) return;   // v24.6 lag fix: no disk writes in the background (a game is loading from the same storage)
-    if (navigator.deviceMemory && navigator.deviceMemory <= 4) return;   // v25.2: small-RAM phones: no extra disk work while music plays
     if (!window.caches || !b || b.size < 50000 || b.size > CC_ONE) return;
     const c = navigator.connection; if (c && c.saveData) return;
     const key = ccKey(url); if (!key || ccBusy.has(key) || ccIdx()[key]) return; ccBusy.add(key);
     try {
-      await idleForPlay(); await new Promise(r => setTimeout(r, 1500));   // never fight the song that is starting
-      const cache = await caches.open(CC_NAME), n = Math.ceil(b.size / CC_CH);
-      for (let i = 0; i < n; i++) {
-        if (document.hidden) { await ccDelete(cache, key, i); return }   // v25.2: left the app while writing -> stop, clean up
-        await cache.put(ccUrl(key, i), new Response(b.slice(i * CC_CH, (i + 1) * CC_CH)));
-        if (i % 2 === 1) await new Promise(r => setTimeout(r, 60));         // small pieces, the player is never blocked
-      }
-      const idx = ccIdx(); idx[key] = { n, size: b.size, type: b.type || 'audio/mp4', t: Date.now() };
+      await idleForPlay(); await new Promise(r => setTimeout(r, 1500)); await idleMove();   // never fight the song that is starting
+      const A0 = adp(), CH = A0.ch, cache = await caches.open(CC_NAME), n = Math.ceil(b.size / CH);
+      let done = 0;
+      try {
+        /* v25.6: the pieces run just AHEAD of the song (lead 1.5-4 s, auto), like a video buffer - never the whole song at once and never together with the next song
+           coming in. The first seconds of a song get a bigger first piece (head, 30+ KB), then only the minimum while it plays. Piece size and the number of
+           writes per round follow the phone (RAM / JS heap) and the network. A piece is written only when the song that owns it is the one playing.
+           The song was skipped / never played for ~40 s -> the half-saved song is removed (below). */
+        const sleep = ms => new Promise(r => setTimeout(r, ms)), sk = () => S.cur && ccKey(streamUrl(S.cur)) === key && au.duration > 0 && isFinite(au.duration);
+        let i = 0, away = 0, wait = 0, pre = 0;
+        while (i < n) {
+          await idleMove();
+          if (!sk()) { if (++away > 80) throw 0; await sleep(500); continue }
+          away = 0;
+          if (PRE.busy && ++pre < 160) { await sleep(250); continue }   // the next song is coming in: no writing together with it
+          const A = adp(), hid = document.hidden, bps = b.size / au.duration;
+          const allowB = Math.min(b.size, (au.currentTime + A.lead + (hid ? 10 : 0)) * bps + (au.currentTime < 3 ? A.head : 0)), allow = Math.ceil(allowB / CH);
+          if (i >= allow) { if (++wait > 1500) throw 0; await sleep(400); continue }
+          wait = 0;
+          const end = hid ? allow : Math.min(allow, i + (A.low ? 1 : 3));   // v25.7: in the background ONE write round per second
+          for (; i < end; i++) { await cache.put(ccUrl(key, i), new Response(b.slice(i * CH, (i + 1) * CH))); done = i + 1 }
+          await sleep(hid ? 1000 : A.low ? 140 : 60);
+        }
+      } catch (e) { await ccDelete(cache, key, done); return }   // write failed (storage full) -> remove the half-saved song
+      const idx = ccIdx(); idx[key] = { n, size: b.size, type: b.type || 'audio/mp4', ch: CH, t: Date.now() };
       let tot = 0; for (const k in idx) tot += idx[k].size || 0;
-      while (tot > CC_MAX) { const old = Object.keys(idx).filter(k => k !== key).sort((x, y) => (idx[x].t || 0) - (idx[y].t || 0))[0]; if (!old) break; tot -= idx[old].size || 0; await ccDelete(cache, old, idx[old].n); delete idx[old] }
+      while (tot > A0.max) { const old = Object.keys(idx).filter(k => k !== key).sort((x, y) => (idx[x].t || 0) - (idx[y].t || 0))[0]; if (!old) break; tot -= idx[old].size || 0; await ccDelete(cache, old, idx[old].n); delete idx[old] }
       ccSave(idx);
     } finally { ccBusy.delete(key) }
   } catch (e) {}
@@ -586,7 +679,7 @@ let STARTING = 0, STARTING_T = 0;
 const starting = () => STARTING && STARTING === PT && Date.now() - STARTING_T < 8000;
 async function startPhone(byUser, back) {
   const t = S.queue[S.qi]; if (!t) return; userPaused = false;
-  const my = ++PT; STARTING = my; STARTING_T = Date.now(); clearTimeout(stallT); clearTimeout(swT); clearTimeout(errT); clearTimeout(startWD); clearTimeout(resumeT);
+  const my = ++PT; PRE_EARLY = HOLD_T ? my : 0; STARTING = my; STARTING_T = Date.now(); clearTimeout(stallT); clearTimeout(swT); clearTimeout(errT); clearTimeout(startWD); clearTimeout(resumeT);
   FADE_END = 0; if (!au.paused && !au.ended && au.getAttribute('src') && fadeM > .05) { FADE_END = Date.now() + 320; fadeTo(0, 320) }
   if (byUser) HB.length = 0;   // v24.3: a song you start yourself has nothing before it
   else if (!back && S.cur && S.cur !== t && (S.cur.uri || fb(S.cur)) !== (t.uri || fb(t))) { HB.push(S.cur); if (HB.length > 60) HB.shift() }
@@ -594,6 +687,7 @@ async function startPhone(byUser, back) {
   const id = ytId(t); let src = '';
   if (id && S.dl[id]) { try { const r = await idbTx('songs', 'readonly', s => s.get(id)); if (r && r.blob) { if (blobUrl) URL.revokeObjectURL(blobUrl); src = blobUrl = URL.createObjectURL(r.blob) } } catch (e) {} }
   if (!src && id && S.dl[id]) { delete S.dl[id]; if (isPrem() && navigator.onLine) setTimeout(() => dlSong(t, true), 5000) }   // v24.3: the downloaded file is missing -> play it online and download it again by itself
+  if (!src && PRE.busy && PRE.busy === preKey(t) && !PRE.url) { for (let i = 0; i < (byUser ? 24 : 40) && PRE.busy === preKey(t) && !PRE.url; i++) await new Promise(r => setTimeout(r, 125)); if (my !== PT) return }   // v25.4: its download is already running (started ~4 s before) - wait for it, no second download
   if (!src && PRE.url && PRE.key === preKey(t)) { if (blobUrl) { try { URL.revokeObjectURL(blobUrl) } catch (e) {} } src = blobUrl = PRE.url; PRE.url = ''; PRE.key = '' }
   else if (PRE.key !== preKey(t)) preDrop();
   if (my !== PT) return;
@@ -604,7 +698,7 @@ async function startPhone(byUser, back) {
   if (!src && mode() === 'phone' && !(navigator.connection && navigator.connection.saveData)) {
     if (!FADE_END || Date.now() >= FADE_END) { clearInterval(fadeIv); fadeIv = null; fadeSet(0, true) } mediaMeta(t); ui();      // the old song dims (v23.10: not cut), the new one is shown while it loads
     const full = fullFetch(url); CURP.my = my; CURP.p = full.p; CURP.ctl = full.ctl;
-    const b = await Promise.race([full.p, new Promise(r => setTimeout(() => r(null), byUser ? 700 : LOAD_WAIT))]);   // v23.9: a tapped song starts within ~0.7 s (instant when it is in the chunk cache); the memory copy is swapped in later
+    const b = await Promise.race([full.p, new Promise(r => setTimeout(() => r(null), (byUser || HOLD_T) ? 700 : LOAD_WAIT))]);   // v23.9: a tapped song starts within ~0.7 s (instant when it is in the chunk cache); the memory copy is swapped in later
     if (my !== PT) return;
     if (b) { if (blobUrl) { try { URL.revokeObjectURL(blobUrl) } catch (e) {} } src = blobUrl = URL.createObjectURL(b); url = src }
     else full.p.then(bb => { if (bb && my === PT) swapIn(bb) });
@@ -653,7 +747,7 @@ setInterval(() => {
   const age = Date.now() - WANT.t; if (age < 2500 || age > 30000 || WANT.n >= 8 || au.error) return;
   WANT.n++; au.play().catch(() => {});
 }, 2000);
-au.addEventListener('playing', () => { WANT.n = 0 });
+au.addEventListener('playing', () => { WANT.n = 0; if (HOLD_T) { HOLD_T = 0; try { ui() } catch (e) {} } });
 const streamUrlQ = t => withMt(U(`/api/app/stream?q=${encodeURIComponent(fb(t).slice(0, 150))}&av=${CV}&hq=${isPrem() ? 1 : 0}`));
 // Keywords that signal lofi/cover/fan-made content
 const FAKE_KWORDS = ['lofi', 'lo-fi', 'lo fi', 'slowed', 'slow +', 'slow and', 'reverb', 'nightcore', 'sped up', 'speed up', '8d audio', '8d', 'bass boosted', 'bassboosted', 'ai cover', '(ai)', '\u00a0(ai)', ' ai ', 'remake', 'recreat', 'cover by', ' cover)', '(cover', 'cover version', 'tribute', 'karaoke', 'instrumental', 'fan made', 'fan-made', 'mashup', 'mash-up', 'remix', 'status video', 'whatsapp status', 'shorts', 'reaction', 'reprise'];
@@ -705,6 +799,7 @@ function rankSearch(list, q, arts) {
 const hideGet = () => jget('lm-hide', []), hideSong = t => { if (!t) return; const h = hideGet(); h.unshift(t.uri || fb(t)); store.set('lm-hide', JSON.stringify(h.slice(0, 300))); toast('Okay, we won\'t play this again') };
 const oneEach = list => { const seen = new Set(), out = []; list.map((x, i) => ({ x, i, s: officialScore(x, '') - i * .4 })).sort((a, b) => b.s - a.s).forEach(e => { const k = songBase(e.x.title); if (k && seen.has(k)) return; seen.add(k); out.push(e) }); return out.sort((a, b) => a.i - b.i).map(e => e.x) };
 async function moreLikeThis() {
+  if (albOnly()) return false;   // v25.5: album mode - nothing from outside the album
   // FIX: cooldown to prevent autoplay from spamming the queue with unrelated/repeated songs
   const now = Date.now();
   if (loadingMore || !navigator.onLine || now - lastMoreMs < MORE_COOLDOWN_MS) return false;
@@ -750,8 +845,8 @@ async function discordPlay(list, i) {
 function playFrom(list, i, asQueue, whole) {
   list = list.map(nt); if (!list[i]) return;
   // FIX: byUser=true because the user tapped a song/playlist directly
-  if (mode() === 'phone') { S.queue = asQueue ? list : [list[i]]; S.qi = asQueue ? i : 0; S.orig = null; S.shuf = false; startPhone(true); buzz() }
-  else discordPlay(whole ? list : [list[i]], whole ? i : 0);
+  if (mode() === 'phone') { S.queue = asQueue ? list : [list[i]]; S.qi = asQueue ? i : 0; ALB_Q = (ALB_NEXT && asQueue) ? S.queue : null; ALB_NEXT = false; S.orig = null; S.shuf = false; startPhone(true); buzz() }
+  else { ALB_NEXT = false; discordPlay(whole ? list : [list[i]], whole ? i : 0) }
 }
 async function ctl(a, body) { if (!S.gid) return toast('Join a voice channel in Discord first'); try { await api(`/api/guilds/${S.gid}/${a}`, { method: 'POST', body: body || undefined }); poll() } catch (e) { toast(e.message) } }
 let userPaused = false, resumeT = null, skipFade = false;
@@ -759,16 +854,19 @@ const act = {
   toggle() { if (mode() === 'phone') { if (!S.cur) return; if (au.paused) { userPaused = false; if (!au.getAttribute('src') || au.error) startPhone(false); else au.play() } else { userPaused = true; au.pause() } } else ctl(S.playing ? 'pause' : 'resume') },
   async next(auto) {
     if (mode() !== 'phone') return ctl('skip');
+    if (auto !== true) holdStart();
     if (auto === true && S.rep === 'one') { au.currentTime = 0; au.play(); return }
     // FIX: skip/next inside a queue is NOT a user song-selection — don't add to RP
     if (S.qi + 1 < S.queue.length) { S.qi++; startPhone(false) }
     else if (S.rep === 'all' && S.queue.length) { S.qi = 0; startPhone(false) }
     else if (S.auto && navigator.onLine && await moreLikeThis()) { S.qi++; startPhone(false) }
+    else if (albOnly() && S.rep !== 'all') { userPaused = true; au.pause(); toast('Album finished') }
     else if (S.queue.length > 1) { S.qi = 0; startPhone(false) }
     else { userPaused = true; au.pause(); toast('End of queue') }
   },
   prev() {
     if (mode() !== 'phone') return ctl('previous');
+    holdStart();
     const cu = S.cur ? (S.cur.uri || fb(S.cur)) : ''; let p = null;
     while (HB.length && !p) { const c = HB.pop(); if ((c.uri || fb(c)) !== cu) p = c }
     if (!p) { au.currentTime = 0; return }   // nothing was played before this song
@@ -795,11 +893,11 @@ au.addEventListener('ended', () => { if (starting()) return; act.next(true) }); 
 au.addEventListener('timeupdate', () => {
   if (!document.hidden) { ui(true); mpos() }   // v23.4: in the background the 5 s watchdog below keeps the OS card in sync
   saveLast();
-  if (au.duration > 0 && au.duration - au.currentTime <= 60 && !PRE.busy && Date.now() - (preloadNext.t || 0) > 5000) { preloadNext.t = Date.now(); preloadNext() }   // v25.2: only in the last 60 s
+  preSchedule();   // v25.4: next song = one download when ~4 s are left
   if (navigator.onLine && Date.now() - lastWarmChk > (document.hidden ? 15000 : 4000)) {   // v24.6 lag fix: background = checked every 15 s, and the next song is fetched only in the last 60 s of this one
     lastWarmChk = Date.now();
-    if (document.hidden) { if (au.duration > 0 && au.duration - au.currentTime <= 60) preloadNext(); return }   // v25.2: background = no extra work except the one last-60-s download
-    if (S.queue.length - S.qi <= 4) moreLikeThis(); warmAhead(); preloadNext()
+    if (document.hidden) { if (au.duration > 0 && au.duration - au.currentTime <= 30) warmAhead(); return }   // v25.4: background = only a tiny 'get ready' ping in the last 30 s
+    if (S.queue.length - S.qi <= 4) moreLikeThis(); warmAhead()
   }
 });
 
@@ -1039,7 +1137,7 @@ function tintFor(t) {          // cheap one-off: average colour of the cover -> 
      take the colour of whatever song is playing and change with every song. */
   const fallback = () => { const h = [...String(t && (t.title || '') + (t.author || ''))].reduce((a, c) => (a * 31 + c.charCodeAt(0)) % 360, 7);
     document.documentElement.style.setProperty('--accent', `hsl(${h} 72% 56%)`);
-    document.documentElement.style.setProperty('--accent2', `hsl(${(h + 42) % 360} 78% 52%)`) };
+    document.documentElement.style.setProperty('--accent2', `hsl(${(h + 42) % 360} 78% 52%)`); document.documentElement.style.setProperty('--np-prog', `hsl(${h} 40% 84%)`) };
   /* v23.0: turn the cover's average colour into a vivid hue (a plain average of a brown/grey photo looks muddy) */
   const vivid = (r, g, b) => {
     r /= 255; g /= 255; b /= 255;
@@ -1048,16 +1146,24 @@ function tintFor(t) {          // cheap one-off: average colour of the cover -> 
     const s = Math.max(0.62, Math.min(0.95, d ? d / (1 - Math.abs(mx + mn - 1)) : 0.7));
     return h;
   };
+  const prog = v => document.documentElement.style.setProperty('--np-prog', v);   // v25.6: light tint of the cover colour for the progress line / dot
   const im = new Image(); im.crossOrigin = 'anonymous'; im.decoding = 'async';
   im.onload = () => { try { const c = document.createElement('canvas'); c.width = c.height = 1; const x = c.getContext('2d'); x.drawImage(im, 0, 0, 1, 1); const d = x.getImageData(0, 0, 1, 1).data;
     const m = Math.max(d[0], d[1], d[2], 1), k = Math.min(1, 150 / m); const col = `rgb(${d[0] * k | 0},${d[1] * k | 0},${d[2] * k | 0})`;
     document.documentElement.style.setProperty('--np-tint', col);
     const h = vivid(d[0], d[1], d[2]);
+    { const mx = Math.max(d[0], d[1], d[2]), mn = Math.min(d[0], d[1], d[2]), sat = mx ? (mx - mn) / mx : 0; prog(`hsl(${h.toFixed(0)} ${Math.round(22 + 48 * Math.min(1, sat * 1.6))}% 82%)`) }
     document.documentElement.style.setProperty('--accent', `hsl(${h.toFixed(0)} 74% 54%)`);
     document.documentElement.style.setProperty('--accent2', `hsl(${((h + 38) % 360).toFixed(0)} 82% 48%)`) } catch (e) { fallback() } };
-  im.onerror = () => { document.documentElement.style.setProperty('--np-tint', '#3a3550'); fallback() };
+  im.onerror = () => { document.documentElement.style.setProperty('--np-tint', '#3a3550'); fallback(); prog('#fff') };
   im.src = art(t);
 }
+{ const st = document.createElement('style'); st.id = 'lm-prog-css';   // v25.6: progress line (played part) + dot in Now Playing, and the mini bar, in a light tint of the cover colour
+  st.textContent = '#np-seek::-webkit-slider-runnable-track{background:linear-gradient(to right,var(--np-prog,#fff) 0,var(--np-prog,#fff) var(--p,0%),rgba(255,255,255,.3) var(--p,0%),rgba(255,255,255,.3) 100%)!important}'
+    + '#np-seek::-webkit-slider-thumb{background:var(--np-prog,#fff)!important;box-shadow:0 0 8px var(--np-prog,#fff)}'
+    + '#mini .bar i{background:var(--np-prog,#fff)!important}'
+    + '#mini .bar #mini-bar::after{background:var(--np-prog,#fff)!important;box-shadow:0 0 8px var(--np-prog,#fff)!important}';
+  document.head.appendChild(st) }
 function ui(light) {
   const phone = mode() === 'phone', t = S.cur;
   const pl = !!S.playing; if (document.body.classList.contains('playing') !== pl) document.body.classList.toggle('playing', pl);
@@ -1066,7 +1172,7 @@ function ui(light) {
   /* v23.4: keep the mini player (cover / title / like) correct even while the phone is locked or another app is in front.
      Before, we bailed out here, so on many phones the top player looked "empty" or did not refresh until a full wake. */
   const mkey = t.title + '|' + t.author;
-  if ($('#mini-t').dataset.k !== mkey) {
+  if ($('#mini-t').dataset.k !== mkey && !holdUi()) {
     $('#mini-t').dataset.k = mkey;
     $('#mini-t').textContent = t.title; $('#mini-s').textContent = t.author;
     $('#mini-art').src = art(t); if (!document.hidden) $('#np-art').src = artHi(t);   // v23.4: big cover is for the Now Playing screen only
@@ -1076,7 +1182,7 @@ function ui(light) {
   }
   /* v23.4: a song changed while the app was in the background (game / screen off): the big cover, cover colour, lyrics and artist card
      (image decoding + network) were skipped to keep the phone free. They are prepared here, the moment the app is visible again. */
-  if (!document.hidden && HEAVYK !== mkey) { HEAVYK = mkey; $('#np-art').src = artHi(t); tintFor(t); lyricsLoad(t); artistCard(t) }
+  if (!document.hidden && HEAVYK !== mkey && !holdUi()) { HEAVYK = mkey; $('#np-art').src = artHi(t); tintFor(t); lyricsLoad(t); artistCard(t) }
   if (_pp !== pl) { _pp = pl; const pp = pl ? PAUSE : PLAY; $('#mini-pp').innerHTML = pp; $('#np-pp').innerHTML = pp; $('#pan-pp').innerHTML = pp }
   if (document.hidden) { nativeSync(); return }      // v23: no heavy screen work while the phone is locked (one full refresh runs the moment it wakes up) -> no lag
   const pos = phone ? au.currentTime * 1000 : S.pos, dur = phone ? ((isFinite(au.duration) && au.duration > 0) ? au.duration * 1000 : t.duration) : S.dur;
@@ -1085,17 +1191,18 @@ function ui(light) {
     const id = ytId(t);
     carSet();
     $('#np-cur').textContent = fmt(pos); $('#np-dur').textContent = fmt(dur);
-    if (!seeking) $('#np-seek').value = dur ? pos / dur * 1000 : 0;
+    if (!seeking) { const f_ = dur ? Math.min(1, pos / dur) : 0; $('#np-seek').value = f_ * 1000; $('#np-seek').style.setProperty('--p', (f_ * 100).toFixed(2) + '%') }
     $('#np-shuf').classList.toggle('on', S.shuf); $('#np-rep').classList.toggle('on', S.rep !== 'off'); $('#np-rep').classList.toggle('one', S.rep === 'one');
-    $('#np-sleep').classList.toggle('on', !!sleepT || sleepEnd); $('#np-dl').classList.toggle('on', !!(id && S.dl[id]));
+    $('#np-sleep').classList.toggle('on', !!sleepT || sleepEnd); $('#np-dl').classList.toggle('on', !!(id && S.dl[id])); npDlPaint(id);
     lyricsTick(pos);
     if (!light && PAN.open && PAN.tab === 'up') queueList();
   }
 }
 function miniLike() { const b = $('#mini-like'); if (!b || !S.cur) return; const on = !!S.liked[S.cur.uri]; b.innerHTML = `<svg viewBox="0 0 24 24">${on ? LK_ON : LK_OFF}</svg>`; b.classList.toggle('on', on) }
 const npArt = $('#np-art'); npArt.addEventListener('error', () => { if (S.cur && npArt.src !== art(S.cur)) npArt.src = art(S.cur) });
+{ const s_ = $('#np-s'); if (s_) { s_.classList.add('lm-art'); s_.addEventListener('click', e => { const t = S.cur; if (!t || !t.author) return; e.stopPropagation(); const nm = t.author.split(/\s*(?:,|&|\sx\s|\sft\.?\s|\sfeat\.?\s)\s*/i)[0].trim(); if (!nm) return; closeNP(); setTimeout(() => { location.hash = '#artist/' + encodeURIComponent(nm) }, 150) }) } }   // v25.5: tap the artist name = artist page (Follow button there)
 let seeking = false; const sk = $('#np-seek');
-sk.addEventListener('input', () => { seeking = true });
+sk.addEventListener('input', () => { seeking = true; sk.style.setProperty('--p', (sk.value / 10).toFixed(2) + '%') });
 sk.addEventListener('change', () => {
   seeking = false; const f = sk.value / 1000;
   if (mode() === 'phone') { if (isFinite(au.duration)) au.currentTime = au.duration * f } else if (S.dur) ctl('seek', { position_ms: Math.floor(S.dur * f) });
@@ -1338,8 +1445,8 @@ const ntDot = () => {
   try { if (bridge && bridge.badge) bridge.badge(n) } catch (e) {}
 };
 /* v24.2: custom-made emoji art instead of system emoji, and every card is signed "Legacy Music · <admin>" */
-const NT_EM = { announcement: 'announce', poll: 'poll', question: 'question', mcq: 'question' };
-const NT_LBL = { announcement: 'Announcement', poll: 'Poll', question: 'Question', mcq: 'Question' };
+const NT_EM = { release: 'announce', announcement: 'announce', poll: 'poll', question: 'question', mcq: 'question' };
+const NT_LBL = { release: 'New release', announcement: 'Announcement', poll: 'Poll', question: 'Question', mcq: 'Question' };
 const ntLeft = m => {
   if (m.expires_at) {
     const t = Date.parse(m.expires_at);
@@ -1362,7 +1469,7 @@ function ntCard(m) {
   const left = ntLeft(m);
   const raw = (m.created_by_name || '').trim();
   const who = (!raw || /^legacy\s*music$/i.test(raw)) ? 'Official' : raw;
-  return `<div class="nt"><div class="nt-top"><img class="em" src="${em}" alt=""><b>${label}${m.title ? ' — ' + esc(m.title) : ''}</b></div>`
+  return `<div class="nt"${m._alb ? ` data-a="open-album" data-id="${esc(m._alb)}" style="cursor:pointer"` : ''}><div class="nt-top"><img class="em" src="${em}" alt=""><b>${label}${m.title ? ' — ' + esc(m.title) : ''}</b></div>`
     + `<div class="nt-by"><img class="lg" src="/static/emojis/legacy.svg" alt=""><span class="nm">Legacy Music</span><i>·</i><span class="who">${esc(who)}</span></div>`
     + body + (left ? `<div class="nt-exp">${esc(left)}</div>` : '') + `</div>`;
 }
@@ -1381,9 +1488,9 @@ document.addEventListener('click', e => { const p = $('#ntpop'); if (!p || p.hid
 async function loadNotifs(auto) {
   if (S.offline || !navigator.onLine) return;
   try {
-    const d = await api('/api/notifications'); NT = arr(d.messages && d.messages.map(m => m) || []);
+    const d = await api('/api/notifications'); NT = arr(d.messages && d.messages.map(m => m) || []).concat(relLocal());
     if (!$('#ntpop').hidden && NT.length !== NTpopN) { $('#ntpop').innerHTML = ntPopHtml(); NTpopN = NT.length }
-    NTold = Object.fromEntries(NT.map(m => [m.id, m]));
+    NTold = Object.fromEntries(NT.map(m => [m.id, m])); setTimeout(checkReleases, 5000);
     ntDot();
     /* v23.2: EVERY new announcement / poll / question goes to the phone's notification bar (not just 3).
        In the APK the native bridge posts a real Android notification; on the website we use the Web
@@ -1588,8 +1695,8 @@ async function run() {
     L.search = ranked.main.concat(ranked.other);
     const mainH = ranked.main.map((x, i) => songRow('search', i, x, moreBtn('search', i))).join(''),
       othH = ranked.other.map((x, i) => songRow('search', ranked.main.length + i, x, moreBtn('search', ranked.main.length + i))).join('');
-    R.innerHTML = (arts.length ? `<h2>Artists</h2>${artistCards(arts)}<h2>Songs</h2>` : '') + (mainH || (othH ? '' : '<div class="empty">No songs found</div>'))
-      + (othH ? `<h2>${ranked.main.length ? 'Other versions' : 'Songs'} <small>covers, remixes &amp; fan uploads</small></h2>${othH}` : '');
+    R.innerHTML = (arts.length ? `<div id="art-box"><h2>Artists</h2>${artistCards(arts)}</div>` : '') + '<div id="alb-box"></div>' + (arts.length ? '<h2 id="songs-h">Songs</h2>' : '') + (mainH || (othH ? '' : '<div class="empty">No songs found</div>'))
+      + (othH ? `<h2>${ranked.main.length ? 'Other versions' : 'Songs'} <small>covers, remixes &amp; fan uploads</small></h2>${othH}` : ''); albUi(v, arts, my, sq);
   } catch (e) { if (my === RT && sq === SQ) R.innerHTML = `<div class="empty">${esc(e.message)}</div>` }
 }
 
@@ -1602,19 +1709,21 @@ async function library() {
   const codes = saved.status === 'fulfilled' ? saved.value.codes || [] : []; S.saved = new Set(codes);
   l.forEach(x => { S.liked[x.uri] = x.id });
   const sv = codes.length ? await resolveSaved(codes, []) : []; if (my !== RT) return;
-  const rowP = (x, sub, kind) => `<button class="row" data-a="open-pl" data-code="${esc(x.code)}"><span class="th" data-plcode="${plc(x.code)}" style="${bgi(fixUrl(x.cover_image_url) || '/static/pwa/icon-512.png')}">${ptkImg(x)}</span><span class="tx"><span class="t">${esc(x.name)}${x.collab ? ' ' + ic('users') : ''}${x.locked ? ' ' + ic('lock') : ''}</span><span class="s">${sub}</span></span><span class="ib more" role="button" data-a="pl-more" data-code="${esc(x.code)}" data-pid="${esc(x.id == null ? '' : x.id)}" data-kind="${kind}" data-name="${esc(x.name)}" data-n="${esc(String(x.track_count || 0))} songs" aria-label="More"><svg viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg></span></button>`;
+  const rowP = (x, sub, kind) => `<button class="row" data-a="open-pl" data-code="${esc(x.code)}"><span class="th" data-plcode="${plc(x.code)}" style="${bgi(fixUrl(x.cover_image_url) || '/static/pwa/icon-512.png')}">${ptkImg(x)}</span><span class="tx"><span class="t">${esc(x.name)}${x.collab ? ' ' + ic('users') : ''}${x.locked ? ' ' + ic('lock') : ''}${plDl(x.code) ? '<span class="dl-ok">' + DL_TICK + '</span>' : ''}</span><span class="s">${sub}</span></span><span class="ib more" role="button" data-a="pl-more" data-code="${esc(x.code)}" data-pid="${esc(x.id == null ? '' : x.id)}" data-kind="${kind}" data-name="${esc(x.name)}" data-n="${esc(String(x.track_count || 0))} songs" aria-label="More"><svg viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg></span></button>`;
   let h = `<button class="row" data-a="open-liked"><span class="th" style="background:linear-gradient(135deg,#7c5cff,#3b9dff);display:grid;place-items:center">${ic('heart', 'fill big')}</span><span class="tx"><span class="t">Liked songs</span><span class="s">${l.length} songs</span></span></button>`;
   h += `<button class="row" data-a="open-dl"><span class="th" style="background:linear-gradient(135deg,#10b981,#3b9dff);display:grid;place-items:center">${ic('dl', 'big')}</span><span class="tx"><span class="t">Downloads ${isPrem() ? '' : ic('crown', 'gold')}</span><span class="s">${d.length} songs · play without internet</span></span></button>`;
   h += p.map(x => rowP(x, `${x.track_count} songs · ${x.is_public && isPrem() ? 'Public' : 'Private'}${x.locked ? ' · 🔒' : ''}${x.collab ? ' · Collaborative' : ''}`, 'own')).join('');
   if (!p.length) h += `<div class="empty">${isPrem() ? 'No playlists yet. Create your first one!' : 'Creating playlists is a Premium feature'}</div>`;
   if (sv.length) h += `<h2>Saved playlists</h2>` + sv.map(x => rowP(x, `${x.track_count || 0} songs`, 'saved')).join('');
+  h += followingHtml();
   const dp = dlPlGet();
+  h += dlAlbHtml();
   if (dp.length) h += `<h2>Downloaded playlists</h2>` + dp.map(x => `<button class="row" data-a="open-pl" data-code="${esc(x.code)}"><span class="th" ${x.code === 'liked' ? '' : `data-plcode="${plc(x.code)}"`} style="${bgi(x.cover || '/static/pwa/icon-512.png')}"></span><span class="tx"><span class="t">${esc(x.name)}<span class="dl-ok">${DL_TICK}</span></span><span class="s">${(x.ids || []).length} songs · downloaded</span></span><span class="ib more" role="button" data-a="dlpl-rm" data-code="${esc(x.code)}" aria-label="Remove"><svg viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg></span></button>`).join('');
-  if ($('#lib')) $('#lib').innerHTML = h;
+  if ($('#lib')) { $('#lib').innerHTML = h; faFill() }
 }
 
 async function downloads(inHome) {
-  const my = RT, d = (await dlMeta()).sort((a, b) => b.ts - a.ts);
+  const my = RT, solo = soloGet(), d = (await dlMeta()).filter(x => solo.has(x.id) || !inDlPl(x.id)).sort((a, b) => b.ts - a.ts);
   if (my !== RT) return; L.dl = d.map(x => ({ ...x, identifier: x.id }));
   const mb = d.reduce((s, x) => s + (x.size || 0), 0) / 1048576;
   const locked = !isPrem();
@@ -1704,6 +1813,203 @@ async function playlist(code) {
   } catch (e) { if (my === RT) view.innerHTML = `<div class="empty">${esc(e.message)}</div>` }
 }
 
+
+/* ───────── v25.5: REAL ALBUMS (Apple iTunes catalogue = real albums + real covers), artist albums, Following, new releases ───────── */
+const ITU = 'https://itunes.apple.com';
+const ituJ = async (path, ms) => { try { const c = new AbortController(), t = setTimeout(() => c.abort(), ms || 7000); const r = await fetch(ITU + path, { signal: c.signal }); clearTimeout(t); return r.ok ? await r.json() : null } catch (e) { return null } };
+const ituArt = (u, n) => String(u || '').replace(/\/\d+x\d+(bb)?\.(jpg|png)/, `/${n || 600}x${n || 600}bb.$2`);
+const albCache = new Map();
+const albNorm = s => String(s || '').toLowerCase().replace(/\(.*?\)|\[.*?\]/g, ' ').replace(/\s-\s(single|ep)$/i, '').replace(/[^a-z0-9\u0900-\u097f\u0a00-\u0a7f\s]/g, ' ').replace(/\s+/g, ' ').trim();
+const albMk = x => ({ id: x.collectionId, name: x.collectionName, artist: x.collectionArtistName || x.artistName, cover: ituArt(x.artworkUrl100, 600), thumb: ituArt(x.artworkUrl100, 300), date: x.releaseDate || '', n: x.trackCount || 0 });
+async function albSearch(term, limit) {
+  const k = 's|' + term + '|' + (limit || 12); if (albCache.has(k)) return albCache.get(k);
+  const d = await ituJ(`/search?term=${encodeURIComponent(term)}&media=music&entity=album&limit=${limit || 12}&country=IN`); if (!d) return [];
+  const seen = new Set(), r = arr(d.results).filter(x => x.collectionId && x.collectionName).map(albMk).filter(a => { const n = albNorm(a.name) + '|' + albNorm(a.artist); if (seen.has(n)) return false; seen.add(n); return true });
+  albCache.set(k, r); return r;
+}
+async function ituSong(term) {
+  const k = 't|' + term; if (albCache.has(k)) return albCache.get(k);
+  const d = await ituJ(`/search?term=${encodeURIComponent(term)}&media=music&entity=song&limit=6&country=IN`); if (!d) return [];
+  const r = arr(d.results).filter(x => x.trackName && x.collectionId).map(x => ({ title: x.trackName, artist: x.artistName, album: albMk(x) }));
+  albCache.set(k, r); return r;
+}
+async function albTracks(id) {
+  const k = 'a|' + id; if (albCache.has(k)) return albCache.get(k);
+  const d = await ituJ(`/lookup?id=${encodeURIComponent(id)}&entity=song&country=IN`); if (!d) return null;
+  const rs = arr(d.results), c = rs.find(x => x.wrapperType === 'collection'); if (!c) return null;
+  const album = albMk(c);
+  const tracks = rs.filter(x => x.wrapperType === 'track' && x.trackName).sort((p, q_) => (p.discNumber || 1) - (q_.discNumber || 1) || (p.trackNumber || 0) - (q_.trackNumber || 0))
+    .map(x => ({ title: x.trackName, author: x.artistName, uri: '', identifier: '', thumbnail: album.cover, duration: x.trackTimeMillis || 0 }));
+  const r = { album, tracks }; albCache.set(k, r); return r;
+}
+const albYear = a => { const y = String(a.date || '').slice(0, 4); return /^\d{4}$/.test(y) ? y : '' };
+const albCards = list => `<div class="cards">${list.map(a => `<button class="card" data-a="open-album" data-id="${esc(a.id)}"><span class="cv" style="${bgi(a.thumb || a.cover)}"></span><span class="t">${esc(a.name)}</span><span class="s">${esc(a.artist)}${albYear(a) ? ' · ' + albYear(a) : ''}</span></button>`).join('')}</div>`;
+const sameArtist = (a, n) => { const x = albNorm(a), y = albNorm(n); return !!x && !!y && (x === y || (y.length > 3 && x.includes(y)) || (x.length > 3 && y.includes(x))) };
+async function latestAlbum(name, singles) {
+  const l = (await albSearch(name, 25)).filter(a => sameArtist(a.artist, name) && (singles || !/\s-\s(single|ep)$/i.test(a.name)));
+  l.sort((p, q_) => String(q_.date).localeCompare(String(p.date))); return l[0] || null;
+}
+/* search: Artist first, then Album, then the song(s), then recommended */
+async function albUi(v, arts, my, sq) {
+  const q = albNorm(v); if (q.length < 2) return;
+  const [alb, sg] = await Promise.all([albSearch(v, 20), ituSong(v)]);
+  const live = () => my === RT && sq === SQ && $('#alb-box');
+  if (!live()) return;
+  const artBlock = a => `<h2>Artist</h2>${artistCards([a])}`;
+  const artFor = nm => { const m = arts.find(a => akey(a.name) === akey(nm)); return m || { name: nm, thumbnail: '' } };
+  const setHead = txt => { const h = $('#songs-h'); if (h) h.textContent = txt; else $('#alb-box').insertAdjacentHTML('afterend', `<h2>${txt}</h2>`) };
+  const dropOthers = () => { const ab = $('#art-box'); if (ab) ab.remove() };
+  // 1) an ARTIST was typed -> his albums under the artist
+  const byArtist = alb.filter(a => albNorm(a.artist) === q || (q.length > 3 && albNorm(a.artist).includes(q)));
+  if (byArtist.length >= 2 || (byArtist.length && byArtist[0] && albNorm(byArtist[0].artist) === q)) {
+    $('#alb-box').innerHTML = `<h2>Albums</h2>${albCards(byArtist.slice(0, 12))}`; return;
+  }
+  // 2) an ALBUM name was typed -> artist, the album, all its songs, then recommended
+  const hit = alb.find(a => { const n = albNorm(a.name); return n && (n === q || (q.length > 4 && n.includes(q)) || (n.length > 4 && q.includes(n))) });
+  if (hit) {
+    const d = await albTracks(hit.id); if (!live()) return; L.albtr = d ? d.tracks : [];
+    dropOthers();
+    $('#alb-box').innerHTML = artBlock(artFor(hit.artist)) + `<h2>Album</h2>${albCards([hit])}` + (L.albtr.length ? `<h2>Album songs</h2>` + L.albtr.map((x, i) => songRow('albtr', i, x, moreBtn('albtr', i))).join('') : '');
+    setHead('Recommended'); return;
+  }
+  // 3) a SONG of an album was typed -> artist, its album, then the song and the recommended ones
+  const sm = sg.find(s => { const n = albNorm(s.title); return n && (n === q || (n.length > 4 && q.includes(n)) || (q.length > 4 && n.includes(q))) });
+  if (sm) {
+    dropOthers();
+    $('#alb-box').innerHTML = artBlock(artFor(sm.artist)) + `<h2>Album</h2>${albCards([sm.album])}`;
+    setHead('Song & recommended');
+  }
+}
+async function albumPage(id) {
+  const my = RT; view.innerHTML = skel(5);
+  const rec = dlAlbGet().find(x => String(x.id) === String(id)), d = await albTracks(id); if (my !== RT) return;
+  let al = d && d.album, tr = d ? d.tracks : [];
+  if (rec) { tr = rec.tracks.slice(); al = al || { id: rec.id, name: rec.name, artist: rec.artist, cover: rec.cover, date: '' } }   // a downloaded album opens even without internet and plays from the phone
+  if (!al || !tr.length) { view.innerHTML = '<div class="empty">Album not found</div>'; return }
+  L.album = tr; S.ctx = al.artist;
+  view.innerHTML = `<button class="btn sm ghost" data-a="pl-back" style="margin:2px 0 8px">‹ Back</button>
+    <div class="hero"><span class="cv" style="${bgi(al.cover)}"></span><div><h1>${esc(al.name)}</h1><div class="sub"><a class="lnk" data-a="open-artist" data-name="${esc(al.artist)}">${esc(al.artist)}</a> · Album${albYear(al) ? ' · ' + albYear(al) : ''} · ${tr.length} songs</div></div></div>
+    <div class="actions"><button class="btn" data-a="album-play">${ic('play', 'fill')} Play</button><button class="btn ghost" data-a="album-shuffle">${ic('shuffle')} Shuffle</button><button class="btn ghost" id="alb-dl" data-a="album-dl" data-id="${esc(al.id)}"></button></div>` +
+    tr.map((x, i) => songRow('album', i, x, moreBtn('album', i))).join('');
+  albBtnPaint(al.id);
+}
+async function artAlbums(name) {
+  if (!$('#art-albums')) return;
+  const my = RT, l = (await albSearch(name, 25)).filter(a => sameArtist(a.artist, name));
+  l.sort((p, q_) => String(q_.date).localeCompare(String(p.date)));
+  const full = l.filter(a => !/\s-\s(single|ep)$/i.test(a.name)), show = (full.length ? full : l).slice(0, 14);
+  if (my !== RT || !show.length || !$('#art-albums')) return;
+  $('#art-albums').innerHTML = `<h2>Albums</h2>${albCards(show)}`;
+}
+/* v25.5: DOWNLOAD A WHOLE ALBUM. Every song is matched to its YouTube song once (remembered in lm-ar), downloaded like a single song (so all of them are in Downloads)
+   and the album is listed in Library -> "Downloaded albums". */
+const dlAlbGet = () => { const a = jget('lm-dlalb', []); return Array.isArray(a) ? a : [] };
+const dlAlbSet = a => { try { store.set('lm-dlalb', JSON.stringify(a.slice(0, 100))) } catch (e) {} };
+const DLALB = {};
+const albDlState = id => DLALB[id] ? 'busy' : dlAlbGet().some(x => String(x.id) === String(id)) ? 'ok' : 'dl';
+function albBtnPaint(id) {
+  const b = $('#alb-dl'); if (!b || b.dataset.id !== String(id)) return; const s = albDlState(id);
+  b.innerHTML = s === 'busy' ? '<span class="dl-ring ind"></span> Downloading…' : s === 'ok' ? `<span class="dl-ok">${DL_TICK}</span> Downloaded` : `${ic('dl')} Download`;
+}
+async function albResolve(t) {
+  const map = jget('lm-ar', {}) || {}, key = akey(t.title + ' ' + t.author);
+  if (map[key] && map[key].uri) return nt(map[key]);
+  const v = (t.title + ' ' + t.author).trim(), d = await api('/api/music/search?query=' + encodeURIComponent(v));
+  const l = arr(d.songs).map(nt).filter(x => ytId(x)); if (!l.length) return null;
+  const r = rankSearch(l, v, []), s = r.main[0] || r.other[0] || l[0];
+  const o = { title: t.title, author: t.author, uri: s.uri, identifier: s.identifier, thumbnail: t.thumbnail || s.thumbnail, duration: t.duration || s.duration };
+  map[key] = o; const ks = Object.keys(map); if (ks.length > 400) delete map[ks[0]]; try { store.set('lm-ar', JSON.stringify(map)) } catch (e) {}
+  return nt(o);
+}
+async function dlAlbum(id) {
+  if (!isPrem()) return premiumSheet('Downloading songs to listen offline is a Premium feature.');
+  if (DLALB[id]) return toast('Album is already downloading');
+  if (!navigator.onLine) return toast("You're offline");
+  const d = await albTracks(id); if (!d || !d.tracks.length) return toast("Can't load this album");
+  DLALB[id] = 1; albBtnPaint(id);
+  try {
+    const total = d.tracks.length, done = []; let n = 0, idx = 0, bad = 0; toast(`Downloading album 0/${total}…`);
+    const worker = async () => { for (;;) {
+      const k = idx++; if (k >= total) return; let s = null;
+      try { s = await albResolve(d.tracks[k]) } catch (e) {}
+      if (!s) { bad++; continue }
+      const ok = await dlSong(s, true), sid = ytId(s);
+      if (ok || (sid && S.dl[sid])) { soloAdd(sid); done[k] = s; n++; toast(`Downloading album ${n}/${total}…`) } else bad++;
+    } };
+    await Promise.all([worker(), worker()]);
+    const tr = done.filter(Boolean);
+    if (tr.length === total) {
+      const a = dlAlbGet().filter(x => String(x.id) !== String(id));
+      a.unshift({ id, name: d.album.name, artist: d.album.artist, cover: d.album.cover, tracks: tr.map(x => ({ title: x.title, author: x.author, uri: x.uri, identifier: x.identifier, thumbnail: x.thumbnail, duration: x.duration })), ts: Date.now() });
+      dlAlbSet(a); toast('Album downloaded'); buzz();
+    } else toast(bad ? `${tr.length}/${total} songs downloaded. Tap Download again to finish the album` : 'Download stopped');
+  } finally { delete DLALB[id]; albBtnPaint(id); if (location.hash.startsWith('#downloads') || location.hash.startsWith('#library')) route() }
+}
+const dlAlbHtml = () => { const a = dlAlbGet(); if (!a.length) return '';
+  return `<h2>Downloaded albums</h2>` + a.map(x => `<button class="row" data-a="open-album" data-id="${esc(x.id)}"><span class="th" style="${bgi(x.cover)}"></span><span class="tx"><span class="t">${esc(x.name)}<span class="dl-ok">${DL_TICK}</span></span><span class="s">${esc(x.artist)} · Album · ${x.tracks.length} songs · downloaded</span></span><span class="ib more" role="button" data-a="dlalb-rm" data-id="${esc(x.id)}" aria-label="Remove"><svg viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg></span></button>`).join('') };
+/* Library -> Following (artists you follow, with the real album cover) */
+const faGet = () => jget('lm-fa-alb', {});
+const faCover = a => (faGet()[akey(a.name)] || {}).cover || fixUrl(a.thumbnail) || '/static/pwa/icon-192.png';
+const followingHtml = () => { const fa = artistsGet(); if (!fa.length) return '';
+  return `<h2>Following</h2>` + fa.map(a => { const k = esc(akey(a.name)), e = faGet()[akey(a.name)];
+    return `<button class="row" data-a="open-artist" data-name="${esc(a.name)}"><span class="th" data-fa="${k}" style="${bgi(faCover(a))}"></span><span class="tx"><span class="t">${esc(a.name)}</span><span class="s">Album · <span class="fa-alb" data-fa="${k}">${e ? esc(e.name) : 'Artist'}</span></span></span></button>` }).join('') };
+async function faFill() {
+  const fa = artistsGet().slice(0, 30), cache = faGet();
+  for (const a of fa) {
+    const k = akey(a.name); let e = cache[k];
+    if (!e || Date.now() - (e.ts || 0) > 6 * 3600e3) { const l = await latestAlbum(a.name, false); if (l) { e = cache[k] = { cover: l.cover, name: l.name, id: l.id, ts: Date.now() }; try { store.set('lm-fa-alb', JSON.stringify(cache)) } catch (x) {} } }
+    if (!e) continue;
+    document.querySelectorAll('[data-fa]').forEach(n => { if (n.dataset.fa !== k) return; if (n.classList.contains('th')) n.style.backgroundImage = `url('${e.cover}')`; else if (n.classList.contains('fa-alb')) n.textContent = e.name });
+  }
+}
+/* new songs / albums of followed artists -> the bell + the phone notification (checked when the app is opened, at most every 3 hours) */
+const relLocal = () => { const a = jget('lm-rel-nt', []); return Array.isArray(a) ? a : [] };
+async function checkReleases() {
+  try {
+    if (S.offline || !navigator.onLine) return;
+    const fa = artistsGet(); if (!fa.length) return;
+    if (Date.now() - (+store.get('lm-rel-ts') || 0) < 3 * 3600e3) return; store.set('lm-rel-ts', String(Date.now()));
+    const sn = jget('lm-rel-seen', {}) || {}; let out = relLocal(), fresh = 0;
+    for (const a of fa.slice(0, 25)) {
+      const l = await latestAlbum(a.name, true); if (!l) continue; const k = akey(a.name);
+      if (sn[k] === undefined) { sn[k] = l.id; continue }   // first time for this artist: remember what is out now, no notification
+      if (String(sn[k]) !== String(l.id) && Date.now() - Date.parse(l.date || 0) < 60 * 86400e3) {
+        const single = /\s-\s(single|ep)$/i.test(l.name), nm = l.name.replace(/\s-\s(single|ep)$/i, '');
+        out.unshift({ id: 'rel-' + l.id, type: 'release', title: a.name, text: `New ${single ? 'song' : 'album'} released today: ${nm}`, created_by_name: 'Artist', _alb: l.id }); fresh++;
+      }
+      sn[k] = l.id;
+    }
+    store.set('lm-rel-seen', JSON.stringify(sn)); store.set('lm-rel-nt', JSON.stringify(out.slice(0, 30)));
+    if (fresh) { store.set('lm-rel-ts', '0'); loadNotifs() }
+  } catch (e) {}
+}
+/* Now Playing: big download arrow (ring while it downloads, tick when it is saved) */
+function npDlPaint(id) {
+  const b = $('#np-dl'); if (!b) return; const on = !!(id && S.dl[id]), k = on ? 'ok' : 'dl'; if (b.dataset.k === k) return; b.dataset.k = k;
+  b.innerHTML = on ? '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M7.5 12.5l3 3 6-6.5"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M12 4v11M7 11l5 5 5-5M5 20h14"/></svg>';
+}
+/* v25.5: "Created by" + the owner's small logo at the bottom of EVERY page (not on the login screen, it has its own) */
+(() => {
+  const mk = () => { const d = document.createElement('div'); d.className = 'lm-credit'; d.innerHTML = `<img src="${LG_CREATOR.avatar}" onerror="this.onerror=null;this.src='${LG_CREATOR.fallback}'" alt=""><span>Created by <b>${esc(LG_CREATOR.name)}</b></span>`; return d };
+  let busy = false;
+  const fix = () => { if (busy || document.body.classList.contains('lg') || !view.firstElementChild) return; const last = view.lastElementChild; if (last && last.classList.contains('lm-credit')) return; busy = true; try { view.querySelectorAll(':scope > .lm-credit').forEach(x => x.remove()); view.appendChild(mk()) } catch (e) {} busy = false };
+  let raf = 0; new MutationObserver(() => { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; fix() }) }).observe(view, { childList: true });
+  setTimeout(fix, 600);
+})();
+(() => { try { const s = document.createElement('style'); s.textContent = `
+.lm-credit{display:flex;align-items:center;justify-content:center;gap:6px;margin:22px 0 8px;font-size:11px;color:var(--mu,#8a8a8a);opacity:.6}
+.lm-credit img{width:14px;height:14px;border-radius:50%;object-fit:cover}
+.lm-credit b{font-weight:600}
+body.lg .lm-credit{display:none}
+.np-ex .dlc{position:relative;border:0!important;background:none!important;width:46px!important;height:46px!important;margin:0 6px 0 0!important;display:grid;place-items:center;color:#fff!important}
+.np-ex .dlc svg{width:29px!important;height:29px!important;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
+.np-ex .dlc.on{color:var(--ok,#22c55e)!important}
+.np-ex .dlc.busy{opacity:1!important;animation:none!important}
+.np-ex .dlc.busy::after{content:'';position:absolute;inset:2px;border-radius:50%;border:3px solid rgba(255,255,255,.18);border-top-color:var(--ok,#22c55e);animation:lmspin .8s linear infinite}
+@keyframes lmspin{to{transform:rotate(360deg)}}
+.np-meta small.lm-art{cursor:pointer;text-decoration:underline;text-decoration-color:rgba(255,255,255,.3);text-underline-offset:3px}
+.hero .lnk{color:inherit;text-decoration:underline;cursor:pointer}`; document.head.appendChild(s) } catch (e) {} })();
+
 async function artistPage(name) {
   const my = RT; view.innerHTML = skel(5);
   try {
@@ -1715,8 +2021,8 @@ async function artistPage(name) {
     view.innerHTML = `<button class="btn sm ghost" data-a="pl-back" style="margin:2px 0 8px">‹ Back</button>
       <div class="hero"><span class="cv" style="${bgi(thumb)};border-radius:50%"></span><div><h1>${esc(shown)}</h1><div class="sub">Artist · ${L.artist.length} songs</div></div></div>
       <div class="actions"><button class="btn${fol ? ' ghost' : ''}" data-a="artist-follow" data-name="${esc(shown)}" data-thumb="${esc(thumb)}">${ic(fol ? 'person' : 'plus')} <span>${fol ? 'Following' : 'Follow'}</span></button>
-      <button class="btn ghost" data-a="artist-play">${ic('play', 'fill')} Play</button><button class="btn ghost" data-a="artist-shuffle">${ic('shuffle')} Shuffle</button></div>` +
-      (L.artist.length ? L.artist.map((x, i) => songRow('artist', i, x, moreBtn('artist', i))).join('') : '<div class="empty">No songs found for this artist</div>');
+      <button class="btn ghost" data-a="artist-play">${ic('play', 'fill')} Play</button><button class="btn ghost" data-a="artist-shuffle">${ic('shuffle')} Shuffle</button></div><div id="art-albums"></div>` +
+      (L.artist.length ? L.artist.map((x, i) => songRow('artist', i, x, moreBtn('artist', i))).join('') : '<div class="empty">No songs found for this artist</div>'); artAlbums(shown);
   } catch (e) { if (my === RT) view.innerHTML = `<div class="empty">${esc(e.message)}</div>` }
 }
 
@@ -1774,14 +2080,8 @@ function goPrev(fromLock) { act.prev() }
     if (lock !== 1) { set(0); return }
     const v = Math.abs(dx) / Math.max(1, Date.now() - t0), go = Math.abs(dx) > w * .28 || (v > .5 && Math.abs(dx) > 36), next = dx < 0;
     if (!go || (next && !S.queue[S.qi + 1] && !S.auto) || (!next && S.qi < 1)) { carEl.classList.add('fly'); set(0); return }
-    carEl.classList.add('fly'); set(next ? -w : w);
-    try { if (S.cur && !au.paused && fadeM > .05) fadeTo(0, 380) } catch (e) {}   // v23.10: the song dims as the cover moves
-    setTimeout(() => {
-      try {   // v23.10: the new cover is put in the middle BEFORE it snaps back - the old cover no longer flashes for a second
-        const ia = $('#np-art'), sd = next ? imgN : imgP, od = next ? imgP : imgN;
-        if (ia && sd.getAttribute('src')) { const old = ia.src; ia.src = sd.src; od.style.visibility = ''; od.src = old; sd.style.visibility = 'hidden'; carKey = '' }
-      } catch (e) {}
-      carEl.classList.remove('fly'); carEl.classList.add('snap'); set(0); if (next) act.next(); else goPrev(); requestAnimationFrame(() => requestAnimationFrame(() => carEl.classList.remove('snap'))) }, 450) };
+    carEl.classList.add('fly'); set(0);   // v25.5: the cover does NOT leave first - the next song starts at once and the new cover comes only when that song really plays
+    holdStart(); if (next) act.next(); else goPrev(); };
   carEl.addEventListener('touchend', end, { passive: true }); carEl.addEventListener('touchcancel', end, { passive: true });
 })();
 
@@ -1851,6 +2151,21 @@ async function lyricsFallback(t) {
   if (g && g.plainLyrics) return mk(g);
   for (const p of sPs) { const r = await p; if (r) return mk(r) }
   const r2 = pick(await tm(`https://lrclib.net/api/search?track_name=${eu(title)}`, 5000)); if (r2) return mk(r2);
+  /* v25.5: messy YouTube titles ("SHADY AF (official Video) Jass Goraya | Prem Dhillon | The Takeover") -> the clean song name (before the "|" and without brackets)
+     and the official name from the catalogue; each one is asked with and without the singer, the answer must really be that song (name check + time check) */
+  try {
+    const t1 = strip(rawT.split('|')[0].replace(/\(.*?\)|\[.*?\]/g, ' ')), names = new Set(); if (t1) names.add(t1); if (title) names.add(title);
+    try { const sg = await ituSong(((t1 || title) + ' ' + au0).trim()); sg.slice(0, 3).forEach(s => { if (s.title && sameArtist(s.artist, au0 || art_)) names.add(strip(s.title)) }) } catch (e) {}
+    const ex = []; [...names].filter(Boolean).slice(0, 4).forEach(nm => {
+      ex.push(tm(`https://lrclib.net/api/search?track_name=${eu(nm)}&artist_name=${eu(au0 || art_)}`, 8000).then(a => [nm, a]));
+      ex.push(tm(`https://lrclib.net/api/search?q=${eu((nm + ' ' + (au0 || art_)).trim())}`, 8000).then(a => [nm, a]));
+      ex.push(tm(`https://lrclib.net/api/search?track_name=${eu(nm)}`, 8000).then(a => [nm, a]));
+    });
+    const rs = await Promise.all(ex), loose = (nm, a) => { if (!Array.isArray(a)) return []; const n = albNorm(nm); return a.filter(x => { if (dur && x.duration && Math.abs(x.duration - dur) > 25) return false; const tn = albNorm(x.trackName || x.name || ''); return n && tn && (tn === n || (n.length > 3 && (tn.includes(n) || n.includes(tn)))) }) };
+    const all = []; rs.forEach(([nm, a]) => all.push(...loose(nm, a)));
+    const best = all.find(x => x.syncedLyrics) || all.find(x => x.plainLyrics); if (best) return mk(best);
+    for (const nm of [...names].slice(0, 2)) { const o2 = await tm(`https://api.lyrics.ovh/v1/${eu(au0 || art_)}/${eu(nm)}`, 6000); if (o2 && o2.lyrics) return { lines: [], plain: String(o2.lyrics).replace(/\r/g, '').trim() } }
+  } catch (e) {}
   const o = await tm(`https://api.lyrics.ovh/v1/${eu(art_)}/${eu(title)}`, 6000);
   if (o && o.lyrics) return { lines: [], plain: String(o.lyrics).replace(/\r/g, '').trim() };
   return null;
@@ -2119,10 +2434,10 @@ function route() {
 }
 function routeNow() {
   const h = (location.hash || '#home').slice(1), [a, b] = h.split('/');
-  const tab = ['home', 'search', 'library', 'you'].includes(a) ? a : a === 'admin' ? 'you' : (a === 'code' || a === 'downloads' || a === 'plnew' || a === 'plcollab' || a === 'pledit' ? 'library' : a === 'artist' ? 'search' : 'home');
+  const tab = ['home', 'search', 'library', 'you'].includes(a) ? a : a === 'admin' ? 'you' : (a === 'code' || a === 'downloads' || a === 'plnew' || a === 'plcollab' || a === 'pledit' ? 'library' : (a === 'artist' || a === 'album') ? 'search' : 'home');
   document.querySelectorAll('.tabs a').forEach(x => x.classList.toggle('on', x.dataset.tab === tab));
   scrollTo(0, 0);
-  ({ home, search, library, you, downloads, admin: () => adminPage(b), plnew: () => plForm('new'), plcollab: () => plForm('collab'), pledit: () => plForm('edit', b) }[a] || (a === 'code' ? () => playlist(b) : a === 'artist' ? () => artistPage((() => { try { return decodeURIComponent(b || '') } catch (e) { return b || '' } })()) : home))();
+  ({ home, search, library, you, downloads, admin: () => adminPage(b), plnew: () => plForm('new'), plcollab: () => plForm('collab'), pledit: () => plForm('edit', b) }[a] || (a === 'code' ? () => playlist(b) : a === 'album' ? () => albumPage(b) : a === 'artist' ? () => artistPage((() => { try { return decodeURIComponent(b || '') } catch (e) { return b || '' } })()) : home))();
 }
 addEventListener('hashchange', route);
 addEventListener('offline', () => { S.offline = true; netBar(false); if (!location.hash || location.hash === '#home') route() });
@@ -2356,9 +2671,10 @@ document.addEventListener('click', async e => {
   }
   else if (a === 'play') {
     if (el.dataset.l === 'dl' && !isPrem()) return premiumSheet('Playing your downloads needs an active Premium.');
-    const l = el.dataset.l, coll = ['pl', 'dl', 'artist'].includes(l);
+    const l = el.dataset.l, coll = ['pl', 'dl', 'artist', 'album', 'albtr'].includes(l);
     // FIX: If tapped from search results, record in search history
     if ((l === 'search') && list[i]) rpSearchPush(nt(list[i]));
+    if (l === 'album' || l === 'albtr') ALB_NEXT = true;
     playFrom(list, i, coll || !S.auto, l === 'pl');
     if (l !== 'search' && l !== 'artist') S.ctx = ''
   }
@@ -2372,6 +2688,9 @@ document.addEventListener('click', async e => {
   else if (a === 'open-artist') { const nm = el.dataset.name; closeSheet(); afterSheet(() => { location.hash = '#artist/' + encodeURIComponent(nm) }) }
   else if (a === 'artist-follow') { const on = artistToggle(el.dataset.name, el.dataset.thumb); ev(on ? 'follow' : 'unfollow', { ref: el.dataset.name, thumb: noMt(el.dataset.thumb || '') }); el.classList.toggle('ghost', on); el.querySelector('span').textContent = on ? 'Following' : 'Follow'; toast(on ? 'Following ' + el.dataset.name : 'Unfollowed ' + el.dataset.name); buzz() }
   else if (a === 'artist-play') { playFrom(L.artist || [], 0, true, true); S.ctx = (L.artist && L.artist[0] && L.artist[0].author) || S.ctx }
+  else if (a === 'open-album') { closeNotifs(); closeSheet(); afterSheet(() => { location.hash = '#album/' + el.dataset.id }) }
+  else if (a === 'album-play') { ALB_NEXT = true; playFrom(L.album || [], 0, true, true) }
+  else if (a === 'album-shuffle') { ALB_NEXT = true; playFrom((L.album || []).slice().sort(() => Math.random() - .5), 0, true, true) }
   else if (a === 'artist-shuffle') { playFrom((L.artist || []).slice().sort(() => Math.random() - .5), 0, true, true) }
   else if (a === 'pl-back') { if (history.length > 1) history.back(); else location.hash = '#home' }
   else if (a === 'dl-it') { closeSheet(); dlSong(nt(list[i])) }
@@ -2384,6 +2703,8 @@ document.addEventListener('click', async e => {
   else if (a === 'dl-play') { if (L.dl && L.dl.length) playFrom(L.dl, 0, true, false) }
   else if (a === 'dl-clear') { if (await askYes('Delete all downloaded songs from this phone?', 'Delete')) { for (const x of (await dlMeta())) await dlRemove(x.id); toast('Downloads deleted'); route() } }
   else if (a === 'open-dl') location.hash = '#downloads';
+  else if (a === 'album-dl') { const id_ = el.dataset.id; if (albDlState(id_) === 'ok') toast('Album is already downloaded'); else dlAlbum(id_) }
+  else if (a === 'dlalb-rm') { e.stopPropagation(); const c = el.dataset.id; if (await askYes('Remove this album from Downloaded albums? The songs stay in Downloads.', 'Remove')) { dlAlbSet(dlAlbGet().filter(x => String(x.id) !== String(c))); toast('Removed'); route() } }
   else if (a === 'dlpl-rm') { e.stopPropagation(); const c = el.dataset.code; if (await askYes('Remove this playlist from Downloaded playlists? The songs stay in Downloads.', 'Remove')) { store.set('lm-dlpl', JSON.stringify(dlPlGet().filter(x => x.code !== c))); toast('Removed'); route() } }
   else if (a === 'pl-dl') {
     const m = L.plMeta || {}, hc = (location.hash.match(/^#code\/([^?\/]+)/) || [])[1] || m.code || '';
