@@ -766,3 +766,9 @@ html.netbar-on{--nb:calc(28px + var(--sab))}
 #np-ch .ch-t{flex:none;width:46px;height:46px;border-radius:6px;background:#2a2a2e center/cover no-repeat}
 #np-ch .ch-pl b{display:block;font-size:14px;font-weight:600}
 #np-ch .ch-pl small{color:rgba(255,255,255,.6);font-size:12px}
+
+/* ===== perf-fix: no full-screen blur / extra GPU layers (scroll, window move, game open/close lag) ===== */
+#np-bg,#lyv-bg{filter:none!important;transform:none!important;inset:0!important;transition:none!important;opacity:.28!important;will-change:auto!important;contain:strict}
+.np-sl{will-change:auto!important}
+.card .cv b{backdrop-filter:none!important;background:rgba(0,0,0,.7)!important}
+html.bgd #np-bg,html.bgd #lyv-bg{display:none!important}
