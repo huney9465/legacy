@@ -10,7 +10,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <script>try{var t=localStorage.getItem('lm-theme')||'auto';document.documentElement.dataset.theme=t==='auto'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t}catch(e){}</script>
 <script>window.LM_BASE=(window.LMNative&&LMNative.base&&LMNative.base())||'';</script>
-<link rel="stylesheet" href="/static/pwa/app.css?v=23.0">
+<link rel="stylesheet" href="/static/pwa/app.css?v=23.8">
 </head>
 <body>
 <header class="top">
@@ -79,6 +79,7 @@
     <div class="pan-tabs" id="pan-tabs"><button data-a="np-tab" data-k="up" class="on">UP NEXT</button><button data-a="np-tab" data-k="lyr">LYRICS</button><button data-a="np-tab" data-k="rel">RELATED</button><i id="pan-ul"></i></div>
     <div class="pan-body"><div id="pan-up"></div><div id="pan-lyr" hidden></div><div id="pan-rel" hidden></div></div>
   </div>
+  <div id="np-ch" hidden></div>
   <div class="np-tabs"><button data-a="np-tab" data-k="up">UP NEXT</button><button data-a="np-tab" data-k="lyr">LYRICS</button><button data-a="np-tab" data-k="rel">RELATED</button></div>
   <div id="np-lcard" class="np-card" hidden><b class="ct">Lyrics preview</b><div id="np-lines"></div><button class="pillbtn" data-a="lyrics-full">Show lyrics</button></div>
   <div id="np-acard" class="np-card ac" hidden></div>
@@ -88,6 +89,6 @@
 <div id="upd" hidden></div>
 <div id="toast" role="status"></div>
 <audio id="au" preload="auto"></audio>
-<script src="/static/pwa/app.js?v=23.0" defer></script>
+<script src="/static/pwa/app.js?v=23.8" defer></script>
 </body>
 </html>
