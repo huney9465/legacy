@@ -1,4 +1,5 @@
-/* v25.7: fewer requests = less lag: 2 requests per next song (head + rest), cache pieces >= 32 KB, one write round per second in the background.
+/* v25.8: the next song comes in as ONE request that is read slowly, starting 15-40 s (auto) before the end and finishing ~1.5 s before it: the chunks run ahead, the song follows, no burst.
+   v25.7: fewer requests = less lag: 2 requests per next song (head + rest), cache pieces >= 32 KB, one write round per second in the background.
    v25.6: CHUNKS RUN AHEAD, THE SONG FOLLOWS. Chunk size / lead are auto-detected all the time from the real network speed, RAM (deviceMemory, JS heap) and
    saveData (adp()). Next song: nothing while the song plays; ~4 s before the end only a small HEAD piece (30-100 KB), the rest in small Range pieces
    one at a time (bigger only when little time is left). Chunk writes pause while the next song comes in (never together). Now Playing: the line behind
@@ -412,11 +413,12 @@ const albOnly = () => !!ALB_Q && S.queue === ALB_Q;
 let HOLD_T = 0, PRE_EARLY = 0;   // v25.5: HOLD_T = a next / previous was pressed: the screen keeps the old song until the new one really plays
 const holdUi = () => !!HOLD_T && Date.now() - HOLD_T < 2500;
 function holdStart() { HOLD_T = Date.now(); setTimeout(() => { if (HOLD_T && Date.now() - HOLD_T >= 2500) { HOLD_T = 0; try { ui() } catch (e) {} } }, 2600) }
-const PRE_AT = 4;   // v25.4: the NEXT song starts downloading when this many seconds of the current song are left
+const PRE_AT = 4;   // (v25.8: only used as the last-moment limit; the next song now starts earlier and slowly: preAt())
+const preAt = () => { const a = adp(); return a.slow ? 40 : a.bw > 1250000 ? 15 : 25 };   // seconds before the end when the next song starts coming in (one request, read slowly)   // v25.4: the NEXT song starts downloading when this many seconds of the current song are left
 function preSchedule() {   // v25.4: called from timeupdate; fires preloadNext() at ~PRE_AT s left even if the background wakes us only every few seconds
   if (PRE.sched || PRE.busy || !(au.duration > 0) || !isFinite(au.duration)) return;
-  const rem = au.duration - au.currentTime; if (rem > PRE_AT + 7 || rem <= 0) return;
-  const my = PT; PRE.sched = setTimeout(() => { PRE.sched = 0; if (my === PT) preloadNext() }, Math.max(0, (rem - PRE_AT) * 1000));
+  const rem = au.duration - au.currentTime, at = preAt(); if (rem > at + 7 || rem <= 0) return;
+  const my = PT; PRE.sched = setTimeout(() => { PRE.sched = 0; if (my === PT) preloadNext() }, Math.max(0, (rem - at) * 1000));
 }
 const preKey = t => t && (ytId(t) || t.uri || '');
 function preDrop() { try { PRE.ctl && PRE.ctl.abort() } catch (e) {} PRE.ctl = null; PRE.busy = ''; if (PRE.url) { try { URL.revokeObjectURL(PRE.url) } catch (e) {} } PRE.url = ''; PRE.key = '' }
@@ -471,30 +473,28 @@ const sleepMs = ms => new Promise(r => setTimeout(r, ms));
      then pieces of ch bytes; when little time is left before the current song ends the pieces grow (max 256 KB) so it is ready on time.
    While there is plenty of time (and the app is in front) it simply waits - nothing runs next to the song.
    A server without Range support answers 200 with the whole file: that is used as it is (the old way). */
-async function rangeLoad(url, sig, live, n, early) {
-  const o = { credentials: NAT ? 'omit' : 'same-origin', signal: sig };
-  const parts = []; let pos = 0, total = 0, type = '', polls = 0;
-  const cut = r => { try { r.body && r.body.cancel() } catch (e) {} };
-  while (true) {
-    if (!live()) return null;
-    const A = adp(), first = pos === 0;
-    if (!first) {   // v25.7: only 2 requests per song: the head, then ALL the rest in one open-ended request (started when the time is right)
-      const eta = (total - pos) / Math.max(60000, NETBPS || A.bw), rem = leftSec(n);
-      if (rem >= eta * 1.6 + 1.2 && !early && !document.hidden && ++polls < 40) { await sleepMs(250); continue }
+async function rangeLoad(url, sig, live, n, early) {   // v25.8: ONE request per song, read slowly: the pieces run ahead and finish just before the current song ends
+  const r = await fetch(url, { credentials: NAT ? 'omit' : 'same-origin', signal: sig, headers: { Range: 'bytes=0-' } });
+  const cut = () => { try { r.body && r.body.cancel() } catch (e) {} };
+  if (r.status !== 200 && r.status !== 206) { cut(); return null }
+  const m = /\/(\d+)\s*$/.exec(r.headers.get('Content-Range') || ''), total = m ? +m[1] : +(r.headers.get('Content-Length') || 0);
+  if (total > CC_ONE) { cut(); return null }
+  const type = r.headers.get('Content-Type') || 'audio/mp4';
+  if (!r.body || !r.body.getReader || !total) return r.blob();   // no streaming possible: take it whole (old way)
+  const rd = r.body.getReader(), parts = []; let pos = 0;
+  const rem0 = leftSec(n), W0 = Math.max(1, rem0 - 1.5);   // time budget: the song must be complete ~1.5 s before the current one ends
+  try {
+    while (pos < total) {
+      if (!live()) { try { rd.cancel() } catch (e) {} return null }
+      const A = adp(), rem = leftSec(n);
+      const f = (early || rem0 > 900) ? 1 : Math.min(1, Math.max(0, 1 - (rem - 1.5) / W0));   // how much of the song should be here by now
+      const allowed = Math.min(total, Math.ceil(total * f) + A.head);                          // head first, then it keeps just ahead of the clock
+      if (pos >= allowed) { await sleepMs(document.hidden || au.paused ? 1000 : 250); continue }   // not reading = the network slows itself down (no extra requests)
+      const { done, value } = await rd.read(); if (done) break;
+      parts.push(value); pos += value.length;
     }
-    const r = await fetch(url, { ...o, headers: { Range: 'bytes=' + pos + '-' + (first ? pos + A.head - 1 : '') } });
-    const t0 = performance.now();
-    if (r.status === 200 && first) { const b = await r.blob(); netNote(b.size, performance.now() - t0); return b }
-    if (r.status !== 206) { cut(r); return null }
-    const m = /bytes\s+(\d+)-\d+\/(\d+)\s*$/.exec(r.headers.get('Content-Range') || '');
-    if (!m || +m[1] !== pos) { cut(r); return null }
-    total = +m[2]; if (total > CC_ONE) { cut(r); return null }
-    if (!type) type = r.headers.get('Content-Type') || 'audio/mp4';
-    const b = await r.blob(); if (!b.size) return null;
-    netNote(b.size, performance.now() - t0); parts.push(b); pos += b.size;
-    if (pos >= total) break;
-  }
-  return new Blob(parts, { type });
+  } catch (e) { try { rd.cancel() } catch (e2) {} return null }
+  return pos >= total ? new Blob(parts, { type }) : null;
 }
 async function preloadNext() {
   if (PRE.busy || mode() !== 'phone' || !S.cur || !navigator.onLine || document.hidden && au.paused) return;
@@ -502,7 +502,7 @@ async function preloadNext() {
   const n = S.queue[S.qi + 1]; if (!n) return;
   const key = preKey(n); if (!key || PRE.key === key || (ytId(n) && S.dl[ytId(n)])) return;
   /* v25.2: NOTHING during the song. v25.6: ~4 s before the end only the head + small pieces (see rangeLoad), not one big download. */
-  { const rem = (au.duration > 0 && isFinite(au.duration)) ? au.duration - au.currentTime : 9999; if (PRE_EARLY !== PT && (rem > PRE_AT + 2 || !(au.currentTime >= 4))) return }
+  { const rem = (au.duration > 0 && isFinite(au.duration)) ? au.duration - au.currentTime : 9999; if (PRE_EARLY !== PT && (rem > preAt() + 2 || !(au.currentTime >= 4))) return }
   const my = PT, early = PRE_EARLY === PT, ctl = new AbortController(); PRE.busy = key; PRE.ctl = ctl;
   /* still wanted: it is still the next song, OR it has just become the current one (the boundary came while its pieces were still coming - they are kept, not restarted) */
   const live = () => !ctl.signal.aborted && ((my === PT && S.queue[S.qi + 1] === n) || S.cur === n);
@@ -603,12 +603,11 @@ async function ccPut(url, b) {
            writes per round follow the phone (RAM / JS heap) and the network. A piece is written only when the song that owns it is the one playing.
            The song was skipped / never played for ~40 s -> the half-saved song is removed (below). */
         const sleep = ms => new Promise(r => setTimeout(r, ms)), sk = () => S.cur && ccKey(streamUrl(S.cur)) === key && au.duration > 0 && isFinite(au.duration);
-        let i = 0, away = 0, wait = 0, pre = 0;
+        let i = 0, away = 0, wait = 0;
         while (i < n) {
           await idleMove();
           if (!sk()) { if (++away > 80) throw 0; await sleep(500); continue }
           away = 0;
-          if (PRE.busy && ++pre < 160) { await sleep(250); continue }   // the next song is coming in: no writing together with it
           const A = adp(), hid = document.hidden, bps = b.size / au.duration;
           const allowB = Math.min(b.size, (au.currentTime + A.lead + (hid ? 10 : 0)) * bps + (au.currentTime < 3 ? A.head : 0)), allow = Math.ceil(allowB / CH);
           if (i >= allow) { if (++wait > 1500) throw 0; await sleep(400); continue }
@@ -627,10 +626,10 @@ async function ccPut(url, b) {
 }
 window.lmClearChunkCache = async () => { try { await caches.delete(CC_NAME); ccSave({}); return true } catch (e) { return false } };
 function fullFetch(url) {
-  const ctl = new AbortController();
+  const ctl = new AbortController(), t0 = performance.now();
   const net = () => fetch(url, { credentials: NAT ? 'omit' : 'same-origin', signal: ctl.signal }).then(r => r.ok ? r.blob() : null)
     .then(b => (b && b.size >= 50000 && /^(audio|video)\/|octet/.test(b.type || 'audio/')) ? b : null).catch(() => null);
-  const p = ccGet(url).then(hit => hit || net().then(b => { if (b) ccPut(url, b); return b }));   // v23.7: the saved chunks first, the network only if they are missing
+  const p = ccGet(url).then(hit => hit || net().then(b => { if (b) { netNote(b.size, performance.now() - t0); ccPut(url, b) } return b }));   // v23.7: the saved chunks first, the network only if they are missing
   return { p, ctl };
 }
 function swapIn(b) {
