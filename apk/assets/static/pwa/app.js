@@ -436,27 +436,8 @@ function fullyLoaded() {
    piece. It is fetched in small Range pieces (40 KB) with a short pause between them, so the player/CPU/disk are never busy for long.
    The pieces are joined into one memory copy; when the next song starts it begins at once. Server without Range support -> returns null (old way). */
 const TR_CH = 10240, TR_MIN_GAP = 600, TR_MAX_GAP = 3000;   // v25.1: tiny 10 KB pieces (was 40 KB) - a 1 GB / 2 GB RAM, 1-core phone never feels it
-async function trickleFetch(url, signal, stale) {
-  const parts = []; let pos = 0, total = 0, type = 'audio/mp4';
-  while (true) {
-    if (signal.aborted || stale()) return null;
-    const t0 = Date.now();
-    const r = await fetch(url, { headers: { Range: 'bytes=' + pos + '-' + (pos + TR_CH - 1) }, credentials: NAT ? 'omit' : 'same-origin', signal });
-    if (r.status !== 206) { try { r.body && r.body.cancel() } catch (e) {} return null }
-    const m = /\/(\d+)\s*$/.exec(r.headers.get('Content-Range') || ''); if (!m) return null; total = +m[1];
-    if (r.headers.get('Content-Type')) type = r.headers.get('Content-Type');
-    const b = await r.blob(); if (!b.size) return null; parts.push(b); pos += b.size;
-    if (pos >= total) break;
-    if (total > CC_ONE) return null;
-    /* v25.1: slow, even pace (foreground AND background): the pieces are spread over ~80 % of the time the current song has left,
-       so the next song is ready before this one ends, and the phone only ever does a tiny bit of work at a time. */
-    const left = (au.duration > 0 && isFinite(au.duration)) ? Math.max(5, au.duration - au.currentTime) : 150;
-    const need = Math.max(1, Math.ceil((total - pos) / TR_CH));
-    const gap = Math.max(TR_MIN_GAP, Math.min(TR_MAX_GAP, Math.floor(left * 800 / need) - (Date.now() - t0)));
-    await new Promise(res => setTimeout(res, gap));
-  }
-  return new Blob(parts, { type });
-}
+/* v23.8-fix (BUG 6): trickleFetch() was dead code (nothing called it; the 10 KB trickle was
+   replaced by rangeLoad()). Removed. */
 /* v25.6 AUTO-DETECT. Looked up again before every piece, so the chunk size follows the phone and the network while the app runs:
      speed  = measured speed of the last downloads (netNote), else navigator.connection.downlink, else 400 KB/s
      memory = navigator.deviceMemory (RAM) and the JS heap (performance.memory); a busy / small phone gets smaller pieces and fewer writes
@@ -505,42 +486,38 @@ async function rangeLoad(url, sig, live, n, early) {   // v25.8: ONE request per
 }
 /* v25.11: the chunk loader is now only a tiny touch: ONE small request (16 KB) when 5.5 s are left, so the server has the next song ready. Nothing is kept in memory, nothing is written. */
 const WN = { key: '' };
+/* v23.8-fix (BUG 2B + BUG 2C): the next song is really PRE-BUFFERED now, in the background too.
+   The old code did `if (... || document.hidden) return` - so while the screen was off / another app was
+   in front NOTHING was prepared, and every track boundary had to open a new network stream = the gap
+   and the stutter the user hears. In the foreground it only fetched 16 KB and threw it away, which the
+   <audio> element can never use anyway.
+   Now: warm ping -> rangeLoad() -> PRE.url (a blob). startPhone() already starts a song from PRE.url
+   instantly, so the next track begins with no gap. Only ONE song is held in RAM, capped by CC_ONE, and
+   the blob is revoked as soon as the song is playing. */
 async function preloadNext() {
   try {
-    if (mode() !== 'phone' || !S.cur || !navigator.onLine || document.hidden) return;
+    if (mode() !== 'phone' || !S.cur || !navigator.onLine) return;   // BUG 2B: no document.hidden here
     const c = navigator.connection; if (c && c.saveData) return;
+    if (PRE.busy) return;
     const n = S.queue[S.qi + 1]; if (!n) return;
-    const key = preKey(n); if (!key || WN.key === key || (ytId(n) && S.dl[ytId(n)])) return;
+    const key = preKey(n); if (!key || PRE.key === key || (ytId(n) && S.dl[ytId(n)])) return;
     const rem = (au.duration > 0 && isFinite(au.duration)) ? au.duration - au.currentTime : 9999;
     if (rem > preAt() + 2 || !(au.currentTime >= 4)) return;
-    WN.key = key; const id = ytId(n);
+    const id = ytId(n);
     if (id) { try { await ff(`/api/app/warm?v=${id}&av=${CV}`) } catch (e) {} }
-    const ctl = new AbortController(); setTimeout(() => { try { ctl.abort() } catch (e) {} }, 4000);
-    const r = await fetch(streamUrl(n), { headers: { Range: 'bytes=0-16383' }, credentials: NAT ? 'omit' : 'same-origin', signal: ctl.signal });
-    try { r.body && await r.body.cancel() } catch (e) {}   // closed at once: no big download, no open stream slot
+    const my = PT, ctl = new AbortController(); PRE.busy = key; PRE.ctl = ctl;
+    const live = () => !ctl.signal.aborted && ((my === PT && S.queue[S.qi + 1] === n) || S.cur === n);
+    try {
+      const b = await rangeLoad(streamUrl(n), ctl.signal, live, n, false);
+      if (!live() || !b || b.size < 50000) return;
+      if (PRE.url) { try { URL.revokeObjectURL(PRE.url) } catch (e) {} }
+      PRE.url = URL.createObjectURL(b); PRE.key = key;
+    } catch (e) {}
+    finally { if (PRE.ctl === ctl) { PRE.busy = ''; PRE.ctl = null } }
   } catch (e) {}
 }
-async function preloadNextOld() {
-
-  if (PRE.busy || mode() !== 'phone' || !S.cur || !navigator.onLine || document.hidden && au.paused) return;
-  const c = navigator.connection; if (c && c.saveData) return;
-  const n = S.queue[S.qi + 1]; if (!n) return;
-  const key = preKey(n); if (!key || PRE.key === key || (ytId(n) && S.dl[ytId(n)])) return;
-  /* v25.2: NOTHING during the song. v25.6: ~4 s before the end only the head + small pieces (see rangeLoad), not one big download. */
-  { const rem = (au.duration > 0 && isFinite(au.duration)) ? au.duration - au.currentTime : 9999; if (PRE_EARLY !== PT && (rem > preAt() + 2 || !(au.currentTime >= 4))) return }
-  const my = PT, early = PRE_EARLY === PT, ctl = new AbortController(); PRE.busy = key; PRE.ctl = ctl;
-  /* still wanted: it is still the next song, OR it has just become the current one (the boundary came while its pieces were still coming - they are kept, not restarted) */
-  const live = () => !ctl.signal.aborted && ((my === PT && S.queue[S.qi + 1] === n) || S.cur === n);
-  try {
-    const nu = streamUrl(n); let b = await ccGet(nu), net = false;   // v23.7: the saved chunks first
-    if (!live()) throw 0;
-    if (!b) { b = await rangeLoad(nu, ctl.signal, live, n, early); net = true }
-    if (!live() || !b || b.size < 50000 || !/^(audio|video)\/|octet/.test(b.type || 'audio/')) throw 0;
-    if (net) ccPut(nu, b);
-    if (PRE.url) { try { URL.revokeObjectURL(PRE.url) } catch (e) {} }
-    PRE.url = URL.createObjectURL(b); PRE.key = key;
-  } catch (e) {} finally { if (PRE.ctl === ctl) { PRE.busy = ''; PRE.ctl = null } }
-}
+/* v23.8-fix (BUG 6): preloadNextOld() was dead code - nothing called it, and it depended on
+   ccGet()/ccPut() which already returned null/no-op. Removed. preloadNext() above does the job. */
 
 /* ── v23.1: Android 16 media controls ────────────────────────────────────────────────────────────────
    Android 16 shows our song in three places: the status-bar "1 device" output chip, the Quick Settings
@@ -673,7 +650,7 @@ function swapIn(b) {
 const SAVE_K = 'lm-last'; let lastSave = 0;
 function saveLast(force) {
   if (!S.cur || mode() !== 'phone') return; const n = Date.now(); if (!force && n - lastSave < (document.hidden ? 20000 : 3000)) return; lastSave = n;
-  try { const pos = au.readyState > 0 ? Math.floor(au.currentTime || 0) : (S.rp || 0); store.set(SAVE_K, JSON.stringify({ cur: S.cur, q: S.queue.slice(Math.max(0, S.qi), S.qi + 40), pos, hb: HB.slice(-30) })) } catch (e) {}
+  try { const pos = au.readyState > 0 ? Math.floor(au.currentTime || 0) : (S.rp || 0); store.set(SAVE_K, JSON.stringify({ cur: S.cur, q: S.queue.slice(Math.max(0, S.qi), S.qi + 40), pos, pl: S.playing ? 1 : 0, hb: HB.slice(-30) })) } catch (e) {}   // v23.8-fix: pl = was it playing
 }
 addEventListener('pagehide', () => saveLast(true));
 document.addEventListener('visibilitychange', () => { if (document.hidden) saveLast(true) });
@@ -681,12 +658,13 @@ async function restoreLast() {
   if (S.cur || mode() !== 'phone') return;
   let d; try { d = JSON.parse(store.get(SAVE_K)) } catch (e) { return } if (!d || !d.cur) return;
   const q = (Array.isArray(d.q) ? d.q : []).map(nt).filter(x => x && x.title); const t = q[0] || nt(d.cur); if (!t || !t.title) return;
-  S.queue = q.length ? q : [t]; S.qi = 0; S.cur = t; S.orig = null; userPaused = true; S.rp = +d.pos || 0;
+  const wasPlaying = !!d.pl;   // v23.8-fix: if it was playing when the app died, continue - do not sit there paused
+  S.queue = q.length ? q : [t]; S.qi = 0; S.cur = t; S.orig = null; userPaused = !wasPlaying; S.rp = +d.pos || 0;
   (Array.isArray(d.hb) ? d.hb : []).forEach(x => { try { HB.push(nt(x)) } catch (e) {} });
   const id = ytId(t); let src = '';
   if (id && S.dl[id]) { try { const r = await idbTx('songs', 'readonly', s => s.get(id)); if (r && r.blob) src = blobUrl = URL.createObjectURL(r.blob) } catch (e) {} }
   if (!src && navigator.onLine) src = streamUrl(t);
-  if (src) { const go = () => { au.removeEventListener('loadedmetadata', go); try { if (S.rp > 1) au.currentTime = S.rp } catch (e) {} au.pause(); ui() }; au.addEventListener('loadedmetadata', go); au.src = src }
+  if (src) { const go = () => { au.removeEventListener('loadedmetadata', go); try { if (S.rp > 1) au.currentTime = S.rp } catch (e) {} if (wasPlaying) { playNow(); fadeTo(1, 400) } else au.pause(); ui() }; au.addEventListener('loadedmetadata', go); au.src = src }
   mediaMeta(t); ui();
 }
 /* v24.4: playback has priority over downloads. While a song is starting (until it really plays, max 9 s) downloads wait,
@@ -875,7 +853,7 @@ function playFrom(list, i, asQueue, whole) {
   else { ALB_NEXT = false; discordPlay(whole ? list : [list[i]], whole ? i : 0) }
 }
 async function ctl(a, body) { if (!S.gid) return toast('Join a voice channel in Discord first'); try { await api(`/api/guilds/${S.gid}/${a}`, { method: 'POST', body: body || undefined }); poll() } catch (e) { toast(e.message) } }
-let userPaused = false, resumeT = null, skipFade = false;
+let userPaused = false, resumeT = null, skipFade = false, interrupted = false;   // v23.8-fix (BUG 2D)
 const act = {
   toggle() { if (mode() === 'phone') { if (!S.cur) return; if (au.paused) { userPaused = false; if (!au.getAttribute('src') || au.error) startPhone(false); else au.play() } else { userPaused = true; au.pause() } } else ctl(S.playing ? 'pause' : 'resume') },
   async next(auto) {
@@ -901,18 +879,35 @@ const act = {
     startPhone(false, true);
   },
 };
-au.addEventListener('play', () => { S.playing = true; if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'; mpos(true); msSync(false); duckAuto(); ui() });
+au.addEventListener('play', () => { S.playing = true; interrupted = false; if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'; mpos(true); msSync(false); duckAuto(); ui() });
+/* v23.8-fix (BUG 2D): a 'pause' the user did NOT ask for is an INTERRUPTION (phone call, voice note,
+   another player, audio-focus loss), not a decision. The old code set userPaused = true right here, so
+   after a call the song stayed paused for ever and even the lock-screen play button looked dead.
+   Now the song remembers that it was interrupted and continues by itself; a real user pause cancels it. */
 au.addEventListener('pause', () => {
-  S.playing = false; if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; mpos(true);
-  /* v23.1: if Android took the audio focus away (a game / another player started) while we were in the background,
-     remember it so the song continues as soon as we are back - instead of silently staying paused. */
-  ui();
-  /* v24.7: a phone call / a video / another app took the audio focus -> the song STAYS paused (no forced restart any more).
-     The person starts it again himself with the play button. */
-  if (!userPaused && S.cur && !au.ended && !au.error && mode() === 'phone' && !(au.duration && au.duration - au.currentTime < .4) && au.currentTime > .5 && !starting()) {
-    clearTimeout(resumeT); userPaused = true; ui();
-  }
+  S.playing = false; if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; mpos(true); nativeSync(true); ui();
+  const natural = !S.cur || au.ended || !!au.error || mode() !== 'phone' || starting()
+    || (au.duration && au.duration - au.currentTime < .4) || au.currentTime <= .5;
+  if (userPaused || natural) { interrupted = false; return }
+  if (interrupted) return;                 // the retry ladder is already running - do not start another
+  interrupted = true;
+  resumeAfterInterruption();
 });
+function resumeAfterInterruption() {
+  clearTimeout(resumeT);
+  /* v23.8-fix: only short interruptions are retried here (a notification, a voice note, a reel).
+     A long phone call must NOT be fought for audio focus, so after ~17 s we stop and wait for the app
+     to come back to the front (visibilitychange / focus below resumes it at once). */
+  const tries = [900, 2500, 5000, 9000];
+  let i = 0;
+  const step = () => {
+    if (!interrupted || userPaused || !S.cur || au.error || !au.paused) { interrupted = false; return }
+    au.play().catch(() => {});
+    if (i < tries.length) resumeT = setTimeout(step, tries[i++]);
+    else { interrupted = false; ui() }     // still busy: stay paused, one tap brings it back
+  };
+  resumeT = setTimeout(step, tries[i++]);
+}
 au.addEventListener('loadedmetadata', () => { mpos(true); nativeSync(true) });
 au.addEventListener('seeked', () => { mpos(true); nativeSync(true) });
 au.addEventListener('ended', () => { if (starting()) return; act.next(true) });   // v23.8: the OLD song ending while a tapped song loads must not start another song
@@ -944,9 +939,10 @@ const msWake = () => { clearTimeout(msWake.t); msWake.t = setTimeout(() => { if 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
   msWake();
+  if (interrupted && !userPaused && au.paused) { clearTimeout(resumeT); resumeAfterInterruption() }   // v23.8-fix (BUG 2D)
 });
 window.addEventListener('pageshow', msWake);
-window.addEventListener('focus', msWake);
+window.addEventListener('focus', () => { msWake(); if (interrupted && !userPaused && au.paused) { clearTimeout(resumeT); resumeAfterInterruption() } });   // v23.8-fix (BUG 2D)
 const altQ = t => [fb(t)].filter(x => x.trim());   // v24.3: only the SAME song (its own id, then its exact title + artist) - never another upload or spelling
 au.addEventListener('error', async () => {
   if (!au.src || starting()) return;   // v23.8: the OLD source breaking while a tapped song loads is not about the new song
@@ -991,17 +987,12 @@ function recover(why) {
 au.preload = 'auto';
 /* v24.3: if the song stutters (game / voice chat / weak network) the WHOLE song is loaded into the phone's memory and playback continues from there,
    so the network and the busy CPU can no longer interrupt it. Also done when the app goes to the background before the song is fully loaded. */
-const SW = { busy: false }; let swT = 0;
-async function smoothSwap() {
-  return;   // v25.12: no whole-song memory copy any more (RAM)
-  if (SW.busy || !S.cur || mode() !== 'phone' || !navigator.onLine) return;
-  const src = au.src; if (!src || src.startsWith('blob:')) return;
-  const my = PT; SW.busy = true;
-  try {
-    let pr = CURP.my === my && CURP.p; if (!pr) { const f = fullFetch(src); CURP.my = my; CURP.p = pr = f.p; CURP.ctl = f.ctl }
-    const b = await pr; if (b && my === PT && au.src === src) swapIn(b);
-  } finally { SW.busy = false }
-}
+let swT = 0;
+/* v23.8-fix (BUG 6): everything after `return;` here was unreachable dead code. Copying the WHOLE song
+   into RAM on every stall is exactly what caused the memory pressure and the renderer crashes
+   (black screen), so it is gone for good. A real stall is handled by recover() below, which reloads the
+   SAME stream at the current position - no second copy, no blob. */
+function smoothSwap() { /* intentionally empty - see recover() */ }
 au.addEventListener('waiting', () => { clearTimeout(stallT); clearTimeout(swT); swT = setTimeout(() => { if (!au.paused && au.readyState < 3) smoothSwap() }, 1800); stallT = setTimeout(() => { if (!au.paused && au.readyState < 3) recover('stall') }, 6500) });
 ['playing', 'canplay', 'pause', 'emptied'].forEach(e => au.addEventListener(e, () => { clearTimeout(stallT); clearTimeout(swT) }));
 const bufAhead = () => { try { return au.buffered.length ? au.buffered.end(au.buffered.length - 1) - au.currentTime : 0 } catch (e) { return 0 } };
@@ -1097,7 +1088,9 @@ function fadeTo(target, ms, done) {
   }, 40);
 }
 function duckSet(m) { if (Math.abs(m - duckM) < .01) return; duckM = m; applyGain(false) }
-function duckAuto() { duckSet((duckOn && document.hidden && S.playing) ? DUCK_LEVEL : 1) }
+/* v23.8-fix (BUG 2E): this is opt-in (lm-duck2 === '1', OFF by default) and it can no longer fire
+   while a song is still starting, so it never makes the volume jump right after a track change. */
+function duckAuto() { duckSet((duckOn && document.hidden && S.playing && !starting()) ? DUCK_LEVEL : 1) }
 document.addEventListener('visibilitychange', () => {
   if (!duckOn) { duckSet(1); return }
   if (document.hidden) setTimeout(() => { if (document.hidden && S.playing) duckSet(DUCK_LEVEL) }, 350);   // small delay: a quick glance at a notification should not dip the sound
@@ -3128,7 +3121,7 @@ let lastNat = '';
 function nativeSync(force) {
   if (!bridge || !bridge.nowPlaying) return;
   const t = S.cur, liked = !!(t && S.liked[t.uri]);
-  const k = t ? [t.title, t.author, S.playing ? 1 : 0, liked ? 1 : 0, S.shuf ? 1 : 0, (typeof spd === 'function' ? spd() : 1), Math.floor((au.currentTime || 0) / 15)].join('|') : '';
+  const k = t ? [t.title, t.author, S.playing ? 1 : 0, liked ? 1 : 0, S.shuf ? 1 : 0, (typeof spd === 'function' ? spd() : 1), Math.floor(au.currentTime || 0)].join('|') : '';   // v23.8-fix (BUG 3): 1 s resolution, was a 15 s bucket -> the lock-screen seek bar jumped
   if (k === lastNat && !force) return; lastNat = k;
   const x = t ? JSON.stringify({ thumb: noMt(art(t)), thumb2: noMt(artHi(t)), pos: Math.round((au.currentTime || 0) * 1000), dur: (isFinite(au.duration) && au.duration > 0) ? Math.round(au.duration * 1000) : (t.duration || 0), liked, shuf: !!S.shuf, speed: (typeof spd === 'function' ? spd() : 1) }) : '';
   try { bridge.nowPlaying(t ? t.title : '', t ? t.author : '', !!S.playing, x) } catch (e) {}
