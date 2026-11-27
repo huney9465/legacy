@@ -1,4 +1,7 @@
-/* v25.9: LESS LAG: no song-piece writing to the phone, next song = ONE slow request, starts only when 5.5 s of the current song are left, lighter blur/animations, notifications every 2 min.
+/* v25.12: the playing song STREAMS (no whole-song copy in RAM, no big download): much less RAM and internet while a game runs.
+   v25.11: next song = only one tiny 16 KB request at 5.5 s left (server warm-up), nothing else.
+   v25.10: chunk loader removed completely: nothing is loaded in advance, the next song loads when it starts.
+   v25.9: LESS LAG: no song-piece writing to the phone, next song = ONE slow request, starts only when 5.5 s of the current song are left, lighter blur/animations, notifications every 2 min.
    New on Now Playing: artist circle + channel link, the artist's playlists (or 'There is no playlist of this song'), album name behind the singer.
    v25.8: the next song comes in as ONE request that is read slowly, starting 15-40 s (auto) before the end and finishing ~1.5 s before it: the chunks run ahead, the song follows, no burst.
    v25.7: fewer requests = less lag: 2 requests per next song (head + rest), cache pieces >= 32 KB, one write round per second in the background.
@@ -417,7 +420,8 @@ const holdUi = () => !!HOLD_T && Date.now() - HOLD_T < 2500;
 function holdStart() { HOLD_T = Date.now(); setTimeout(() => { if (HOLD_T && Date.now() - HOLD_T >= 2500) { HOLD_T = 0; try { ui() } catch (e) {} } }, 2600) }
 const PRE_AT = 4;   // (v25.8: only used as the last-moment limit; the next song now starts earlier and slowly: preAt())
 const preAt = () => 5.5;   // v25.9: starts only ~10 s before the end (25 s on a slow net), ONE slow request   // seconds before the end when the next song starts coming in (one request, read slowly)   // v25.4: the NEXT song starts downloading when this many seconds of the current song are left
-function preSchedule() {   // v25.4: called from timeupdate; fires preloadNext() at ~PRE_AT s left even if the background wakes us only every few seconds
+function preSchedule() {
+   // v25.4: called from timeupdate; fires preloadNext() at ~PRE_AT s left even if the background wakes us only every few seconds
   if (PRE.sched || PRE.busy || !(au.duration > 0) || !isFinite(au.duration)) return;
   const rem = au.duration - au.currentTime, at = preAt(); if (rem > at + 7 || rem <= 0) return;
   const my = PT; PRE.sched = setTimeout(() => { PRE.sched = 0; if (my === PT) preloadNext() }, Math.max(0, (rem - at) * 1000));
@@ -498,7 +502,25 @@ async function rangeLoad(url, sig, live, n, early) {   // v25.8: ONE request per
   } catch (e) { try { rd.cancel() } catch (e2) {} return null }
   return pos >= total ? new Blob(parts, { type }) : null;
 }
+/* v25.11: the chunk loader is now only a tiny touch: ONE small request (16 KB) when 5.5 s are left, so the server has the next song ready. Nothing is kept in memory, nothing is written. */
+const WN = { key: '' };
 async function preloadNext() {
+  try {
+    if (mode() !== 'phone' || !S.cur || !navigator.onLine || document.hidden) return;
+    const c = navigator.connection; if (c && c.saveData) return;
+    const n = S.queue[S.qi + 1]; if (!n) return;
+    const key = preKey(n); if (!key || WN.key === key || (ytId(n) && S.dl[ytId(n)])) return;
+    const rem = (au.duration > 0 && isFinite(au.duration)) ? au.duration - au.currentTime : 9999;
+    if (rem > preAt() + 2 || !(au.currentTime >= 4)) return;
+    WN.key = key; const id = ytId(n);
+    if (id) { try { await ff(`/api/app/warm?v=${id}&av=${CV}`) } catch (e) {} }
+    const ctl = new AbortController(); setTimeout(() => { try { ctl.abort() } catch (e) {} }, 4000);
+    const r = await fetch(streamUrl(n), { headers: { Range: 'bytes=0-16383' }, credentials: NAT ? 'omit' : 'same-origin', signal: ctl.signal });
+    try { r.body && await r.body.cancel() } catch (e) {}   // closed at once: no big download, no open stream slot
+  } catch (e) {}
+}
+async function preloadNextOld() {
+
   if (PRE.busy || mode() !== 'phone' || !S.cur || !navigator.onLine || document.hidden && au.paused) return;
   const c = navigator.connection; if (c && c.saveData) return;
   const n = S.queue[S.qi + 1]; if (!n) return;
@@ -577,6 +599,7 @@ let LASTMOVE = 0; ['touchmove', 'scroll', 'wheel'].forEach(n_ => addEventListene
 const idleMove = async () => { for (let i = 0; i < 400 && Date.now() - LASTMOVE < 700 && !document.hidden; i++) await new Promise(r => setTimeout(r, 200)) };
 async function ccDelete(cache, key, n) { for (let i = 0; i < n; i++) { try { await cache.delete(ccUrl(key, i)) } catch (e) {} } }
 async function ccGet(url) {
+  return null;   // v25.10: saved pieces are not used any more
   try {
     if (!window.caches) return null; const key = ccKey(url); if (!key) return null;
     const idx = ccIdx(), e = idx[key]; if (!e || !e.n) return null;
@@ -697,7 +720,7 @@ async function startPhone(byUser, back) {
   let url = src || streamUrl(t);
   if (!src) playGateOpen(9000);
   try { CURP.ctl && CURP.ctl.abort() } catch (e) {} CURP.p = null; CURP.ctl = null;
-  if (!src && mode() === 'phone' && !(navigator.connection && navigator.connection.saveData)) {
+  if (false && !src && mode() === 'phone' && !(navigator.connection && navigator.connection.saveData)) {   // v25.12: OFF - the song is no longer loaded whole into the phone's memory, it streams (like Spotify)
     if (!FADE_END || Date.now() >= FADE_END) { clearInterval(fadeIv); fadeIv = null; fadeSet(0, true) } mediaMeta(t); ui();      // the old song dims (v23.10: not cut), the new one is shown while it loads
     const full = fullFetch(url); CURP.my = my; CURP.p = full.p; CURP.ctl = full.ctl;
     const b = await Promise.race([full.p, new Promise(r => setTimeout(() => r(null), (byUser || HOLD_T) ? 700 : LOAD_WAIT))]);   // v23.9: a tapped song starts within ~0.7 s (instant when it is in the chunk cache); the memory copy is swapped in later
@@ -969,6 +992,7 @@ au.preload = 'auto';
    so the network and the busy CPU can no longer interrupt it. Also done when the app goes to the background before the song is fully loaded. */
 const SW = { busy: false }; let swT = 0;
 async function smoothSwap() {
+  return;   // v25.12: no whole-song memory copy any more (RAM)
   if (SW.busy || !S.cur || mode() !== 'phone' || !navigator.onLine) return;
   const src = au.src; if (!src || src.startsWith('blob:')) return;
   const my = PT; SW.busy = true;
