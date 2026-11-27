@@ -17,6 +17,9 @@ jobs:
       - name: Repack APK with the version from VERSION
         run: python3 tools/build.py build/unsigned.apk
 
+      - name: Compile the fixed Java classes (./java) and inject them into the APK
+        run: python3 tools/inject_java.py build/unsigned.apk
+
       - name: Get signing key (from GitHub Secrets)
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
