@@ -16,7 +16,7 @@
    NOTE: bump CV below together with APP_VERSION in pwa.py on every release. */
 (() => {
 'use strict';
-const CV = '23.7';
+const CV = '23.8';
 /* APK mode: the Android app bundles these files and talks to the server over HTTPS with a token (window.LM_BASE is set by its index.html).
    On the website / installed PWA LM_BASE is empty and everything works exactly as before (cookie login, same origin). */
 const NAT = (typeof window.LM_BASE === 'string' && window.LM_BASE) ? window.LM_BASE.replace(/\/$/, '') : '';
@@ -427,12 +427,13 @@ async function preloadNext() {
   const c = navigator.connection; if (c && c.saveData) return;
   const n = S.queue[S.qi + 1]; if (!n) return;
   const key = preKey(n); if (!key || PRE.key === key || (ytId(n) && S.dl[ytId(n)])) return;
-  if (!(au.currentTime >= 4)) return;   // v25.1: the next song starts loading 4 s after this one starts playing (no waiting for this one to finish loading)
+  /* v25.2 SMOOTH FIX: the old trickle (10 KB piece every 0.6-3 s for the WHOLE song = hundreds of requests + timers) kept the CPU/network busy all the time and
+     made the sound stutter on 2-8 GB phones, most of all when the app went to the background. Now: NOTHING during the song, ONE single request in its last 60 s. */
+  { const rem = (au.duration > 0 && isFinite(au.duration)) ? au.duration - au.currentTime : 9999; if (rem > 60 || !(au.currentTime >= 4)) return }
   const my = PT; PRE.busy = key; PRE.ctl = new AbortController();
   try {
     const nu = streamUrl(n); let b = await ccGet(nu);   // v23.7: the saved chunks first
-    if (!b) { b = await trickleFetch(nu, PRE.ctl.signal, () => my !== PT || S.queue[S.qi + 1] !== n); if (!b && (my !== PT || S.queue[S.qi + 1] !== n)) throw 0 }   // v25.1: 10 KB pieces, foreground and background
-    if (!b && document.hidden && !(au.duration > 0 && au.duration - au.currentTime < 45)) throw 0;   // no Range support: the old big download only in the last 45 s
+    if (my !== PT || S.queue[S.qi + 1] !== n) throw 0;   // v25.2: no trickle any more - one single download (below)
     if (!b) {
       const r = await fetch(nu, { credentials: NAT ? 'omit' : 'same-origin', signal: PRE.ctl.signal });
       if (!r.ok) throw 0;
@@ -512,6 +513,7 @@ async function ccGet(url) {
 async function ccPut(url, b) {
   try {
     if (document.hidden) return;   // v24.6 lag fix: no disk writes in the background (a game is loading from the same storage)
+    if (navigator.deviceMemory && navigator.deviceMemory <= 4) return;   // v25.2: small-RAM phones: no extra disk work while music plays
     if (!window.caches || !b || b.size < 50000 || b.size > CC_ONE) return;
     const c = navigator.connection; if (c && c.saveData) return;
     const key = ccKey(url); if (!key || ccBusy.has(key) || ccIdx()[key]) return; ccBusy.add(key);
@@ -519,6 +521,7 @@ async function ccPut(url, b) {
       await idleForPlay(); await new Promise(r => setTimeout(r, 1500));   // never fight the song that is starting
       const cache = await caches.open(CC_NAME), n = Math.ceil(b.size / CC_CH);
       for (let i = 0; i < n; i++) {
+        if (document.hidden) { await ccDelete(cache, key, i); return }   // v25.2: left the app while writing -> stop, clean up
         await cache.put(ccUrl(key, i), new Response(b.slice(i * CC_CH, (i + 1) * CC_CH)));
         if (i % 2 === 1) await new Promise(r => setTimeout(r, 60));         // small pieces, the player is never blocked
       }
@@ -792,10 +795,10 @@ au.addEventListener('ended', () => { if (starting()) return; act.next(true) }); 
 au.addEventListener('timeupdate', () => {
   if (!document.hidden) { ui(true); mpos() }   // v23.4: in the background the 5 s watchdog below keeps the OS card in sync
   saveLast();
-  if (au.currentTime >= 4 && !PRE.busy && Date.now() - (preloadNext.t || 0) > 5000) { preloadNext.t = Date.now(); preloadNext() }   // v25.1: the trickle starts 4 s into the song (foreground + background)
+  if (au.duration > 0 && au.duration - au.currentTime <= 60 && !PRE.busy && Date.now() - (preloadNext.t || 0) > 5000) { preloadNext.t = Date.now(); preloadNext() }   // v25.2: only in the last 60 s
   if (navigator.onLine && Date.now() - lastWarmChk > (document.hidden ? 15000 : 4000)) {   // v24.6 lag fix: background = checked every 15 s, and the next song is fetched only in the last 60 s of this one
     lastWarmChk = Date.now();
-    if (document.hidden && au.duration > 0 && au.duration - au.currentTime > 60 && S.queue.length - S.qi > 1) { preloadNext(); return }
+    if (document.hidden) { if (au.duration > 0 && au.duration - au.currentTime <= 60) preloadNext(); return }   // v25.2: background = no extra work except the one last-60-s download
     if (S.queue.length - S.qi <= 4) moreLikeThis(); warmAhead(); preloadNext()
   }
 });
@@ -876,7 +879,8 @@ async function smoothSwap() {
 }
 au.addEventListener('waiting', () => { clearTimeout(stallT); clearTimeout(swT); swT = setTimeout(() => { if (!au.paused && au.readyState < 3) smoothSwap() }, 1800); stallT = setTimeout(() => { if (!au.paused && au.readyState < 3) recover('stall') }, 6500) });
 ['playing', 'canplay', 'pause', 'emptied'].forEach(e => au.addEventListener(e, () => { clearTimeout(stallT); clearTimeout(swT) }));
-document.addEventListener('visibilitychange', () => { if (document.hidden) setTimeout(() => { if (document.hidden && S.playing && !fullyLoaded()) smoothSwap() }, 1500) });
+const bufAhead = () => { try { return au.buffered.length ? au.buffered.end(au.buffered.length - 1) - au.currentTime : 0 } catch (e) { return 0 } };
+document.addEventListener('visibilitychange', () => { if (document.hidden) setTimeout(() => { if (document.hidden && S.playing && !fullyLoaded() && bufAhead() < 6) smoothSwap() }, 1500) });   // v25.3: swapping the source ALWAYS makes a gap (and a background WebView can delay the restart), so it is done only when the buffer is almost empty (was < 20 s = swap right when you leave the app)
 au.addEventListener('playing', () => { playGateClose(); failRun = 0; PFAIL.n = 0; clearTimeout(errT); clearTimeout(startWD); if (au.currentTime > 5) stallN = 0 });
 
 /* v23.4: NO automatic resume. If a call, reel, video or another app takes the audio, the song stays paused until the user taps play. */
@@ -1620,7 +1624,7 @@ async function downloads(inHome) {
   if (inHome) { if ($('#h1')) $('#h1').outerHTML = h } else view.innerHTML = h;
 }
 
-/* ───────── playlist cover photo + background (v23.7): stored on the server, shown everywhere the playlist shows ───────── */
+/* ───────── playlist cover photo + background (v23.8): stored on the server, shown everywhere the playlist shows ───────── */
 const PA = { map: {}, blob: new Map(), kind: '', code: '' };
 const plc = c => esc(String(c || '').toUpperCase());
 async function plArtLoad() { try { const d = await api('/api/app/pl-art'); PA.map = (d && d.art) || {}; plArtApply() } catch (e) {} }
