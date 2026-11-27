@@ -16,7 +16,7 @@
    NOTE: bump CV below together with APP_VERSION in pwa.py on every release. */
 (() => {
 'use strict';
-const CV = '23.6';
+const CV = '23.7';
 /* APK mode: the Android app bundles these files and talks to the server over HTTPS with a token (window.LM_BASE is set by its index.html).
    On the website / installed PWA LM_BASE is empty and everything works exactly as before (cookie login, same origin). */
 const NAT = (typeof window.LM_BASE === 'string' && window.LM_BASE) ? window.LM_BASE.replace(/\/$/, '') : '';
@@ -145,8 +145,9 @@ const dlMeta = () => idbTx('meta', 'readonly', s => s.getAll()).catch(() => []);
 const DLP = {};   // song id -> percent while it downloads (-1 = size unknown, spins)
 const DL_TICK = '<svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg>';
 const dlMark = id => !id ? '' : S.dl[id] ? `<span class="dl-ok">${DL_TICK}</span>` : (id in DLP ? `<span class="dl-ring${DLP[id] < 0 ? ' ind' : ''}" style="--p:${Math.max(0, DLP[id])}"></span>` : '');
-const dlSlot = id => { try { document.querySelectorAll('.dl-slot').forEach(s => { if (s.dataset.dlid === id) s.innerHTML = dlMark(id) }) } catch (e) {} };
-const dlProg = (id, p) => { DLP[id] = p; try { document.querySelectorAll('.dl-slot').forEach(s => { if (s.dataset.dlid !== id) return; const r = s.firstElementChild; if (r && r.classList.contains('dl-ring')) { r.classList.toggle('ind', p < 0); r.style.setProperty('--p', Math.max(0, p)) } else s.innerHTML = dlMark(id) }) } catch (e) {} };
+const dlSlot = id => { delete DLPAINT[id]; try { document.querySelectorAll('.dl-slot').forEach(s => { if (s.dataset.dlid === id) s.innerHTML = dlMark(id) }) } catch (e) {} };
+const DLPAINT = {};   // v24.6 lag fix: last % painted per song
+const dlProg = (id, p) => { DLP[id] = p; if (document.hidden) return; { const pi = Math.round(p); if (DLPAINT[id] === pi) return; DLPAINT[id] = pi } try { document.querySelectorAll('.dl-slot').forEach(s => { if (s.dataset.dlid !== id) return; const r = s.firstElementChild; if (r && r.classList.contains('dl-ring')) { r.classList.toggle('ind', p < 0); r.style.setProperty('--p', Math.max(0, p)) } else s.innerHTML = dlMark(id) }) } catch (e) {} };
 /* v24.5: pause / resume / cancel for one song and for a whole playlist download */
 const DLJ = {}, DLPL = {};   // DLJ: song id -> { ctl, paused, cancelled, pl } | DLPL: playlist key -> { paused, cancelled, total, done, name }
 const dlSleep = ms => new Promise(r => setTimeout(r, ms));
@@ -198,12 +199,13 @@ async function dlPlaylist(code, name, cover, tracks) {
   /* v24.4: 3 songs download at the same time and one failed song no longer stops the playlist. v24.5: pause / resume / cancel */
   const P_ = DLPL[k] = { paused: false, cancelled: false, total: todo.length, done: 0, name: name || '' };
   let idx = 0, bad = 0, skipped = 0, stop = false; toast(`Downloading 0/${P_.total}…`); dlPlUi(k);
-  const DL_CONC = 4, warmed = new Set();
+  const DL_CONC = 4, DL_BG_CONC = 2, warmed = new Set();
   const warmFrom = i => { for (let k = i; k < Math.min(todo.length, i + DL_CONC * 2); k++) { const id = ytId(todo[k]); if (!id || warmed.has(id)) continue; warmed.add(id); ff(`/api/app/warm?v=${id}&av=${CV}`).catch(() => {}) } };   // the server starts preparing the next songs while the current ones download
-  const worker = async () => {
+  const worker = async (wid) => {
     for (;;) {
       await idleForPlay();
       while (P_.paused && !P_.cancelled) await dlSleep(300);
+      while (document.hidden && wid >= DL_BG_CONC && !P_.cancelled && !stop) await dlSleep(1500);   // v24.6 lag fix: in the background only DL_BG_CONC songs download at once (a game needs the CPU, RAM and storage)
       if (stop || P_.cancelled || idx >= P_.total) return;
       warmFrom(idx); const t = todo[idx++], ok = await dlSong(t, true, k);
       if (ok) { P_.done++; if (!P_.paused) toast(`Downloading ${P_.done}/${P_.total}…`); dlPlUi(k) }
@@ -211,7 +213,7 @@ async function dlPlaylist(code, name, cover, tracks) {
       else if (++bad >= 4 && !P_.done) stop = true;
     }
   };
-  try { await Promise.all(Array.from({ length: DL_CONC }, worker)) } finally { delete DLPL[k] }
+  try { await Promise.all(Array.from({ length: DL_CONC }, (_, w) => worker(w))) } finally { delete DLPL[k] }
   if (P_.cancelled) { toast('Download cancelled'); return false }
   if (all.every(x => S.dl[ytId(x)])) { dlPlSave(code, name, cover, all); toast('Playlist downloaded'); buzz(); return true }
   toast(skipped && !bad ? 'Some songs were skipped' : 'Download stopped. Try again to finish the playlist'); return false;
@@ -395,15 +397,42 @@ function preDrop() { try { PRE.ctl && PRE.ctl.abort() } catch (e) {} PRE.ctl = n
 function fullyLoaded() {
   try { if (au.src && au.src.startsWith('blob:')) return true; if (!(au.duration > 0) || !au.buffered.length) return false; return au.buffered.end(au.buffered.length - 1) >= au.duration - 1.5 } catch (e) { return false }
 }
+/* v24.8 background trickle: while the app is in the background (screen off / other app in front) the NEXT song is NOT downloaded in one big
+   piece. It is fetched in small Range pieces (40 KB) with a short pause between them, so the player/CPU/disk are never busy for long.
+   The pieces are joined into one memory copy; when the next song starts it begins at once. Server without Range support -> returns null (old way). */
+const TR_CH = 10240, TR_MIN_GAP = 600, TR_MAX_GAP = 3000;   // v25.1: tiny 10 KB pieces (was 40 KB) - a 1 GB / 2 GB RAM, 1-core phone never feels it
+async function trickleFetch(url, signal, stale) {
+  const parts = []; let pos = 0, total = 0, type = 'audio/mp4';
+  while (true) {
+    if (signal.aborted || stale()) return null;
+    const t0 = Date.now();
+    const r = await fetch(url, { headers: { Range: 'bytes=' + pos + '-' + (pos + TR_CH - 1) }, credentials: NAT ? 'omit' : 'same-origin', signal });
+    if (r.status !== 206) { try { r.body && r.body.cancel() } catch (e) {} return null }
+    const m = /\/(\d+)\s*$/.exec(r.headers.get('Content-Range') || ''); if (!m) return null; total = +m[1];
+    if (r.headers.get('Content-Type')) type = r.headers.get('Content-Type');
+    const b = await r.blob(); if (!b.size) return null; parts.push(b); pos += b.size;
+    if (pos >= total) break;
+    if (total > CC_ONE) return null;
+    /* v25.1: slow, even pace (foreground AND background): the pieces are spread over ~80 % of the time the current song has left,
+       so the next song is ready before this one ends, and the phone only ever does a tiny bit of work at a time. */
+    const left = (au.duration > 0 && isFinite(au.duration)) ? Math.max(5, au.duration - au.currentTime) : 150;
+    const need = Math.max(1, Math.ceil((total - pos) / TR_CH));
+    const gap = Math.max(TR_MIN_GAP, Math.min(TR_MAX_GAP, Math.floor(left * 800 / need) - (Date.now() - t0)));
+    await new Promise(res => setTimeout(res, gap));
+  }
+  return new Blob(parts, { type });
+}
 async function preloadNext() {
   if (PRE.busy || mode() !== 'phone' || !S.cur || !navigator.onLine || document.hidden && au.paused) return;
   const c = navigator.connection; if (c && c.saveData) return;
   const n = S.queue[S.qi + 1]; if (!n) return;
   const key = preKey(n); if (!key || PRE.key === key || (ytId(n) && S.dl[ytId(n)])) return;
-  if (!fullyLoaded() && !(au.currentTime > 8 || (au.duration > 0 && au.buffered.length && au.buffered.end(au.buffered.length - 1) >= au.duration * .5))) return;   // v23.2: earlier than before (was 20 s / 70 %)
+  if (!(au.currentTime >= 4)) return;   // v25.1: the next song starts loading 4 s after this one starts playing (no waiting for this one to finish loading)
   const my = PT; PRE.busy = key; PRE.ctl = new AbortController();
   try {
     const nu = streamUrl(n); let b = await ccGet(nu);   // v23.7: the saved chunks first
+    if (!b) { b = await trickleFetch(nu, PRE.ctl.signal, () => my !== PT || S.queue[S.qi + 1] !== n); if (!b && (my !== PT || S.queue[S.qi + 1] !== n)) throw 0 }   // v25.1: 10 KB pieces, foreground and background
+    if (!b && document.hidden && !(au.duration > 0 && au.duration - au.currentTime < 45)) throw 0;   // no Range support: the old big download only in the last 45 s
     if (!b) {
       const r = await fetch(nu, { credentials: NAT ? 'omit' : 'same-origin', signal: PRE.ctl.signal });
       if (!r.ok) throw 0;
@@ -458,11 +487,11 @@ const HB = [];
    or the screen being off cannot make it stutter (a normal <audio> stream stops loading in the background = the stuttering).
    Very slow network (> LOAD_WAIT) -> it starts streaming at once and is swapped to the memory copy as soon as that is complete. */
 const LOAD_WAIT = 3000, CURP = { my: 0, p: null, ctl: null };
-/* v23.7: CHUNK CACHE (online only). Every song that is played is also kept on the phone in small pieces (256 KB chunks, Cache Storage).
+/* v23.7: CHUNK CACHE (online only). Every song that is played is also kept on the phone in small pieces (64 KB chunks since v25.1, Cache Storage).
    The next time the same song is played it is built from those pieces = it starts at once and needs (almost) no network - it can not stop or stutter.
    It is NOT a download: it is not shown in Downloads, it is not available offline (offline still plays only real downloads), and the oldest songs
    are removed by themselves when the cache is over CC_MAX. Writing is slow and in the background, and waits until the song is really playing. */
-const CC_NAME = 'lm-chunks-v1', CC_CH = 262144, CC_MAX = 150 * 1024 * 1024, CC_IDX = 'lm-cc-idx', CC_ONE = 40 * 1024 * 1024;
+const CC_NAME = 'lm-chunks-v1', CC_CH = 65536, CC_MAX = 150 * 1024 * 1024, CC_IDX = 'lm-cc-idx', CC_ONE = 40 * 1024 * 1024;
 const ccKey = url => { try { const u = new URL(url, location.href), g = k => u.searchParams.get(k) || ''; return (g('v') ? 'v:' + g('v') : 'q:' + g('q')) + '|hq' + g('hq') + '|ds' + g('ds') } catch (e) { return '' } };
 const ccIdx = () => { try { const o = JSON.parse(store.get(CC_IDX) || '{}'); return o && typeof o === 'object' ? o : {} } catch (e) { return {} } };
 const ccSave = o => { try { store.set(CC_IDX, JSON.stringify(o)) } catch (e) {} };
@@ -482,6 +511,7 @@ async function ccGet(url) {
 }
 async function ccPut(url, b) {
   try {
+    if (document.hidden) return;   // v24.6 lag fix: no disk writes in the background (a game is loading from the same storage)
     if (!window.caches || !b || b.size < 50000 || b.size > CC_ONE) return;
     const c = navigator.connection; if (c && c.saveData) return;
     const key = ccKey(url); if (!key || ccBusy.has(key) || ccIdx()[key]) return; ccBusy.add(key);
@@ -490,7 +520,7 @@ async function ccPut(url, b) {
       const cache = await caches.open(CC_NAME), n = Math.ceil(b.size / CC_CH);
       for (let i = 0; i < n; i++) {
         await cache.put(ccUrl(key, i), new Response(b.slice(i * CC_CH, (i + 1) * CC_CH)));
-        if (i % 4 === 3) await new Promise(r => setTimeout(r, 40));         // small pieces, the player is never blocked
+        if (i % 2 === 1) await new Promise(r => setTimeout(r, 60));         // small pieces, the player is never blocked
       }
       const idx = ccIdx(); idx[key] = { n, size: b.size, type: b.type || 'audio/mp4', t: Date.now() };
       let tot = 0; for (const k in idx) tot += idx[k].size || 0;
@@ -615,6 +645,7 @@ function playNow() {
 }
 /* v23.6 watchdog: for the first 30 s of every song, if it is not userPaused but the player is stopped, start it again (every 2 s, max 8 tries) */
 setInterval(() => {
+  if (document.hidden) return;   // v24.7: no wake-ups in the background
   if (!WANT.t || userPaused || !S.cur || mode() !== 'phone' || !au.paused || au.ended || !au.getAttribute('src')) return;
   const age = Date.now() - WANT.t; if (age < 2500 || age > 30000 || WANT.n >= 8 || au.error) return;
   WANT.n++; au.play().catch(() => {});
@@ -749,12 +780,10 @@ au.addEventListener('pause', () => {
   /* v23.1: if Android took the audio focus away (a game / another player started) while we were in the background,
      remember it so the song continues as soon as we are back - instead of silently staying paused. */
   ui();
-  /* v23.2: headset mic / voice chat / Bluetooth switching to call mode makes Android pause the song for a moment. It was NOT paused by the user,
-     so we start it again by ourselves (retries for ~5 s only, so a real phone call is not interrupted for long). */
-  if (!userPaused && S.cur && !au.ended && au.readyState >= 2 && !au.error && mode() === 'phone' && !(au.duration && au.duration - au.currentTime < .4)) {
-    clearTimeout(resumeT); const t0 = Date.now();
-    const tryResume = n => { if (userPaused || !au.paused || Date.now() - t0 > 15000) return; au.play().catch(() => {}); resumeT = setTimeout(() => tryResume(n + 1), n < 2 ? 700 : 1500) };
-    resumeT = setTimeout(() => tryResume(0), 450);
+  /* v24.7: a phone call / a video / another app took the audio focus -> the song STAYS paused (no forced restart any more).
+     The person starts it again himself with the play button. */
+  if (!userPaused && S.cur && !au.ended && !au.error && mode() === 'phone' && !(au.duration && au.duration - au.currentTime < .4) && au.currentTime > .5 && !starting()) {
+    clearTimeout(resumeT); userPaused = true; ui();
   }
 });
 au.addEventListener('loadedmetadata', () => { mpos(true); nativeSync(true) });
@@ -763,23 +792,27 @@ au.addEventListener('ended', () => { if (starting()) return; act.next(true) }); 
 au.addEventListener('timeupdate', () => {
   if (!document.hidden) { ui(true); mpos() }   // v23.4: in the background the 5 s watchdog below keeps the OS card in sync
   saveLast();
-  if (navigator.onLine && Date.now() - lastWarmChk > 4000) { lastWarmChk = Date.now(); if (S.queue.length - S.qi <= 4) moreLikeThis(); warmAhead(); preloadNext() }
+  if (au.currentTime >= 4 && !PRE.busy && Date.now() - (preloadNext.t || 0) > 5000) { preloadNext.t = Date.now(); preloadNext() }   // v25.1: the trickle starts 4 s into the song (foreground + background)
+  if (navigator.onLine && Date.now() - lastWarmChk > (document.hidden ? 15000 : 4000)) {   // v24.6 lag fix: background = checked every 15 s, and the next song is fetched only in the last 60 s of this one
+    lastWarmChk = Date.now();
+    if (document.hidden && au.duration > 0 && au.duration - au.currentTime > 60 && S.queue.length - S.qi > 1) { preloadNext(); return }
+    if (S.queue.length - S.qi <= 4) moreLikeThis(); warmAhead(); preloadNext()
+  }
 });
 
 /* v23.1: Android 16 "Now Playing" pill + QS media card + full media card.
    1 s tick keeps the seek bar moving AND re-publishes the session if Android dropped it (card swiped away,
    WebView frozen in the background, "1 device" chip gone). This is what makes the card come back by itself. */
 let tickN = 0;
-setInterval(() => {
-  if (!S.cur || mode() !== 'phone') return;
-  if (document.hidden && (++tickN % 5)) return;   // v23.3: screen off / another app in front -> the OS card moves by itself; keep only a 5 s watchdog
-  msSync(false);
-  if (S.playing) { mpos(true); nativeSync() }
-}, 1000);
+(function tick() {   // v24.6 lag fix: 1 s in front, a real 5 s timer in the background (was a 1 s wake-up that skipped 4 of 5)
+  try {
+    if (S.cur && mode() === 'phone') { msSync(false); if (S.playing) { mpos(true); nativeSync() } }
+  } catch (e) {}
+  setTimeout(tick, document.hidden ? 5000 : 1000);
+})();
 /* coming back to the app (or unlocking the phone): rebuild the whole OS card for the song that is playing right now */
 /* v23.3: waking the phone fired visibilitychange + pageshow + focus together = 3x "rebuild the media card + re-download the artwork"
    right while the song is playing (that was the lag on screen on/off). Now it is done once, a moment later. */
-document.addEventListener('visibilitychange', () => { if (!document.hidden && S.cur) ui() });
 const msWake = () => { clearTimeout(msWake.t); msWake.t = setTimeout(() => { if (S.cur) msSync(true) }, 500) };
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
@@ -941,13 +974,17 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) setTimeout(() => { if (document.hidden && S.playing) duckSet(DUCK_LEVEL) }, 350);   // small delay: a quick glance at a notification should not dip the sound
   else duckSet(1);
 });
-setInterval(() => {   // fade-out like the end of a radio track
+const fadeCheck = () => {   // fade-out like the end of a radio track
   if (document.hidden) { if (fadeM !== 1 && !fadeIv) fadeSet(1); return }   // v24.3: nothing to animate in the background: volume goes down smoothly during the last 4 s
   if (fadeIv || mode() !== 'phone' || !S.cur || au.paused || !(au.duration > 15)) return;
   const left = au.duration - au.currentTime;
   if (left <= FADE_S && left > .05 && S.rep !== 'one') fadeSet(Math.pow(left / FADE_S, 1.4));
   else if (fadeM !== 1) fadeSet(1);
-}, 150);   // v23.2: smaller steps so the 2 s fade-out is smooth, not stair-like
+};
+(function fadeWatch() {   // v24.6 lag fix: 150 ms in front, 2 s in the background (was 6-7 wake-ups every second, always)
+  try { fadeCheck() } catch (e) {}
+  setTimeout(fadeWatch, document.hidden ? 2000 : 150);   // v23.2: small steps in front so the 2 s fade-out is smooth, not stair-like
+})();   // v23.2: smaller steps so the 2 s fade-out is smooth, not stair-like
 au.addEventListener('play', () => { if (AX && AX.ctx.state === 'suspended') AX.ctx.resume().catch(() => {}) });
 document.addEventListener('visibilitychange', () => { if (AX && AX.ctx.state === 'suspended' && !au.paused) AX.ctx.resume().catch(() => {}) });
 if ('mediaSession' in navigator) {
@@ -1361,25 +1398,51 @@ async function loadNotifs(auto) {
           }
         } catch (e) {}
       });
-      if (seen.length && fresh.length && !document.hidden) annBanner(fresh[0]);   // not on the very first run (old messages) - only for really new ones
+      if (seen.length && fresh.length && !document.hidden) fresh.slice(0, 3).forEach((m, i) => annBanner(m, i === 0 ? 0 : 0));   // v25.1: a popup for each new one (max 3, one after another); not on the very first run (old messages)
       store.set('lm-an-seen', JSON.stringify([...new Set([...seen, ...NT.map(m => String(m.id))])].slice(-120)));
     } catch (e) {}
     // v24.1: a new message never jumps in front of the user - it just lights the badge on the bell
   } catch (e) {}
 }
 let NTold = {};
-/* v23.2: a new announcement slides in from the top of the app (tap = open it) */
-function annBanner(m) {
-  try {
-    const old = document.getElementById('annpop'); if (old) old.remove();
-    const d = document.createElement('div'); d.id = 'annpop';
-    d.innerHTML = `<img src="/static/pwa/icon-192.png" alt=""><div><b>${esc(m.title || 'Legacy Music')}</b><span>${esc(String(m.text || m.body || m.message || '').slice(0, 140))}</span></div>`;
-    d.onclick = () => { d.remove(); try { openNotifs() } catch (e) {} };
-    document.body.appendChild(d); requestAnimationFrame(() => d.classList.add('on'));
-    setTimeout(() => { d.classList.remove('on'); setTimeout(() => d.remove(), 350) }, 7000);
-  } catch (e) {}
+/* v25.1: a new announcement / poll / question pops up from the BOTTOM of the screen (like a WhatsApp message): icon + title + text, a vibration,
+   tap = open it, swipe down = dismiss. It is fully self-styled here, so it never depends on any other stylesheet. */
+let annQ = [], annShowing = false;
+function annBanner(m, more) {
+  annQ.push([m, more || 0]); if (!annShowing) annNext();
 }
-setInterval(() => { loadNotifs() }, 60000);
+function annNext() {
+  const it = annQ.shift(); if (!it) { annShowing = false; return } annShowing = true;
+  const [m, more] = it;
+  try {
+    if (!document.getElementById('annpop-css')) {
+      const st = document.createElement('style'); st.id = 'annpop-css';
+      st.textContent = '#annpop{position:fixed;left:50%;right:auto;top:auto;bottom:calc(var(--tabs,54px) + var(--mini,64px) + env(safe-area-inset-bottom,0px) + 12px);width:min(92vw,440px);box-sizing:border-box;display:flex;gap:12px;align-items:center;padding:13px 15px;border-radius:16px;background:#1d1d27;color:#fff;border:1px solid var(--accent,#7c5cff);box-shadow:0 12px 36px rgba(0,0,0,.6),0 0 0 3px rgba(124,92,255,.22);z-index:99999;transform:translate(-50%,170%);opacity:0;transition:transform .45s cubic-bezier(.2,.9,.3,1.08),opacity .3s ease;touch-action:none;cursor:pointer;-webkit-tap-highlight-color:transparent}'
+        + '#annpop.on{transform:translate(-50%,0);opacity:1}#annpop>img{width:42px;height:42px;border-radius:11px;flex:none;object-fit:cover}#annpop>div{min-width:0;flex:1}'
+        + '#annpop small{display:block;font-size:10.5px;letter-spacing:.6px;text-transform:uppercase;color:var(--accent,#7c5cff);font-weight:700;margin-bottom:2px}'
+        + '#annpop b{display:block;font-size:14px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'
+        + '#annpop span{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:12.5px;opacity:.82;line-height:1.35;margin-top:1px}'
+        + '#annpop .tm{margin-left:auto;font-size:11px;opacity:.6;align-self:flex-start;font-style:normal;flex:none}';
+      document.head.appendChild(st);
+    }
+    const old = document.getElementById('annpop'); if (old) old.remove();
+    const lbl = NT_LBL[m.type] || 'Announcement';
+    const d = document.createElement('div'); d.id = 'annpop';
+    d.innerHTML = `<img src="/static/pwa/icon-192.png" alt=""><div><small>New ${esc(lbl)}${more ? ' · +' + more + ' more' : ''}</small><b>${esc(m.title || 'Legacy Music')}</b><span>${esc(String(m.text || m.body || m.message || '').slice(0, 140))}</span></div><i class="tm">now</i>`;
+    let done = false, t = 0, y0 = null, dy = 0;
+    const close = (open) => { if (done) return; done = true; clearTimeout(t); d.classList.remove('on'); d.style.transform = ''; setTimeout(() => { d.remove(); if (open) { try { openNotifs() } catch (e) {} } annNext() }, 380) };
+    d.addEventListener('pointerdown', e => { y0 = e.clientY; dy = 0; try { d.setPointerCapture(e.pointerId) } catch (er) {} clearTimeout(t) });
+    d.addEventListener('pointermove', e => { if (y0 == null) return; dy = Math.max(0, e.clientY - y0); d.style.transition = 'none'; d.style.transform = 'translate(-50%,' + dy + 'px)'; d.style.opacity = String(Math.max(.2, 1 - dy / 140)) });
+    d.addEventListener('pointerup', () => { if (y0 == null) return; const moved = dy; y0 = null; d.style.transition = ''; d.style.opacity = ''; if (moved > 40) close(false); else { d.style.transform = ''; if (moved < 8) close(true); else t = setTimeout(() => close(false), 6000) } });
+    d.addEventListener('pointercancel', () => { y0 = null; d.style.transition = ''; d.style.transform = ''; d.style.opacity = ''; t = setTimeout(() => close(false), 6000) });
+    document.body.appendChild(d); requestAnimationFrame(() => requestAnimationFrame(() => d.classList.add('on')));
+    try { navigator.vibrate && navigator.vibrate([60, 40, 60]) } catch (e) {}
+    t = setTimeout(() => close(false), 9000);
+  } catch (e) { annShowing = false; annNext() }
+}
+let lastNotifAt = 0;
+setInterval(() => { if (document.hidden) return; lastNotifAt = Date.now(); loadNotifs() }, 20000);   // v24.6: not in the background
+document.addEventListener('visibilitychange', () => { if (!document.hidden && Date.now() - lastNotifAt > 3000) { lastNotifAt = Date.now(); loadNotifs() } });
 
 /* v23.2: the website needs permission before it can put a notification in the phone's bar.
    Ask once, on the very first tap (browsers refuse a silent request on page load). */
@@ -1557,7 +1620,7 @@ async function downloads(inHome) {
   if (inHome) { if ($('#h1')) $('#h1').outerHTML = h } else view.innerHTML = h;
 }
 
-/* ───────── playlist cover photo + background (v22.6): stored on the server, shown everywhere the playlist shows ───────── */
+/* ───────── playlist cover photo + background (v23.7): stored on the server, shown everywhere the playlist shows ───────── */
 const PA = { map: {}, blob: new Map(), kind: '', code: '' };
 const plc = c => esc(String(c || '').toUpperCase());
 async function plArtLoad() { try { const d = await api('/api/app/pl-art'); PA.map = (d && d.art) || {}; plArtApply() } catch (e) {} }
@@ -1761,6 +1824,7 @@ async function relLoad() {
     + (L.relv.length ? `<h2>Other performances</h2>${L.relv.map((x, i) => songRow('relv', i, x, moreBtn('relv', i))).join('')}` : '')
     || '<div class="empty">Nothing related yet</div>';
 }
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { try { for (const k in DLP) { delete DLPAINT[k]; dlProg(k, DLP[k]) } } catch (e) {} } });   // v24.6: repaint the download rings that were not drawn in the background
 document.addEventListener('visibilitychange', () => { document.documentElement.classList.toggle('bgd', document.hidden); if (!document.hidden) requestAnimationFrame(() => { try { ui() } catch (e) {} }) });
 
 /* ── lyrics for EVERY song: our server -> lrclib (exact, then search with several spellings) -> lyrics.ovh ── */
@@ -2872,7 +2936,7 @@ setTimeout(() => { try { if (!view.innerHTML.trim()) view.innerHTML = '<div clas
       const watch = w => w && w.addEventListener('statechange', () => { if (w.state === 'installed' && navigator.serviceWorker.controller) showUpdate({ notes: 'New app files are ready.' }) });
       if (reg.waiting && navigator.serviceWorker.controller) showUpdate({ notes: 'New app files are ready.' });
       reg.addEventListener('updatefound', () => watch(reg.installing));
-      setInterval(() => reg.update().catch(() => {}), 30 * 60000);
+      setInterval(() => { if (!document.hidden) reg.update().catch(() => {}) }, 30 * 60000);
     }).catch(() => {});
     let rl = false; navigator.serviceWorker.addEventListener('controllerchange', () => { if (!rl && updShown) { rl = true; location.reload() } });
   }
