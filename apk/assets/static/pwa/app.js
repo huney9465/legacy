@@ -376,6 +376,17 @@ async function warmAhead() {
   } finally { WARM.busy = false }
 }
 const warmSoon = () => { clearTimeout(WARM.t); WARM.t = setTimeout(warmAhead, 1200) };
+/* v23.9: the moment a finger touches a song, the server is asked to prepare its stream - by the time the finger lifts the song is already found,
+   so it starts at once and plays by itself (no need to press play below). */
+document.addEventListener('pointerdown', e => {
+  try {
+    if (mode() !== 'phone' || !navigator.onLine) return;
+    const el = e.target.closest && e.target.closest('[data-a="play"]'); if (!el) return;
+    const it = (L[el.dataset.l] || [])[+el.dataset.i]; const id = it && ytId(nt(it));
+    if (!id || S.dl[id] || WARM.done.has(id)) return;
+    WARM.done.add(id); ff(`/api/app/warm?v=${id}&av=${CV}`).catch(() => WARM.done.delete(id));
+  } catch (err) {}
+}, true);
 /* v23.4: next-song preload. Only when the CURRENT song is fully loaded, the NEXT song (just one) is downloaded once into memory.
    When it starts it plays from memory = instant start, no second download. A skip / queue change cancels it. */
 const PRE = { key: '', url: '', busy: '', ctl: null };
@@ -532,9 +543,19 @@ const PLAYGATE = { until: 0 };
 const playGateOpen = ms => { PLAYGATE.until = Date.now() + ms };
 const playGateClose = () => { PLAYGATE.until = 0 };
 const idleForPlay = async () => { for (let i = 0; i < 40 && Date.now() < PLAYGATE.until; i++) await new Promise(r => setTimeout(r, 250)) };
+/* v23.8: TAP = CHANGE. From the moment a song is chosen until its audio source is set (max 8 s), the OLD song's events (its stream breaking,
+   its end, a stall timer from before the tap) are ignored. Before, such an event in that window started the old / the next song again
+   (the queue wrapped round to the first song) and the song you tapped never came - "I click and the song does not change". */
+/* v23.10: CHANGING SONG = the old song dims at once (320 ms, like the soft ending of a song) while the new one is already loading; the new
+   song starts the moment the old one is quiet (no waiting for the dim first and the loading after it) and fades in. */
+let FADE_END = 0;
+let STARTING = 0, STARTING_T = 0;
+const starting = () => STARTING && STARTING === PT && Date.now() - STARTING_T < 8000;
 async function startPhone(byUser, back) {
   const t = S.queue[S.qi]; if (!t) return; userPaused = false;
-  const my = ++PT; if (byUser) HB.length = 0;   // v24.3: a song you start yourself has nothing before it
+  const my = ++PT; STARTING = my; STARTING_T = Date.now(); clearTimeout(stallT); clearTimeout(swT); clearTimeout(errT); clearTimeout(startWD); clearTimeout(resumeT);
+  FADE_END = 0; if (!au.paused && !au.ended && au.getAttribute('src') && fadeM > .05) { FADE_END = Date.now() + 320; fadeTo(0, 320) }
+  if (byUser) HB.length = 0;   // v24.3: a song you start yourself has nothing before it
   else if (!back && S.cur && S.cur !== t && (S.cur.uri || fb(S.cur)) !== (t.uri || fb(t))) { HB.push(S.cur); if (HB.length > 60) HB.shift() }
   S.cur = t; t._f = 0; t._bx = 0; warmed = '';
   const id = ytId(t); let src = '';
@@ -543,22 +564,23 @@ async function startPhone(byUser, back) {
   if (!src && PRE.url && PRE.key === preKey(t)) { if (blobUrl) { try { URL.revokeObjectURL(blobUrl) } catch (e) {} } src = blobUrl = PRE.url; PRE.url = ''; PRE.key = '' }
   else if (PRE.key !== preKey(t)) preDrop();
   if (my !== PT) return;
-  if (!src && !navigator.onLine) { toast("You're offline. Only downloaded songs play."); ui(); return }
+  if (!src && !navigator.onLine) { STARTING = 0; toast("You're offline. Only downloaded songs play."); ui(); return }
   let url = src || streamUrl(t);
   if (!src) playGateOpen(9000);
   try { CURP.ctl && CURP.ctl.abort() } catch (e) {} CURP.p = null; CURP.ctl = null;
   if (!src && mode() === 'phone' && !(navigator.connection && navigator.connection.saveData)) {
-    clearInterval(fadeIv); fadeIv = null; fadeSet(0, true); mediaMeta(t); ui();      // the old song goes quiet, the new one is shown while it loads
+    if (!FADE_END || Date.now() >= FADE_END) { clearInterval(fadeIv); fadeIv = null; fadeSet(0, true) } mediaMeta(t); ui();      // the old song dims (v23.10: not cut), the new one is shown while it loads
     const full = fullFetch(url); CURP.my = my; CURP.p = full.p; CURP.ctl = full.ctl;
-    const b = await Promise.race([full.p, new Promise(r => setTimeout(() => r(null), LOAD_WAIT))]);
+    const b = await Promise.race([full.p, new Promise(r => setTimeout(() => r(null), byUser ? 700 : LOAD_WAIT))]);   // v23.9: a tapped song starts within ~0.7 s (instant when it is in the chunk cache); the memory copy is swapped in later
     if (my !== PT) return;
     if (b) { if (blobUrl) { try { URL.revokeObjectURL(blobUrl) } catch (e) {} } src = blobUrl = URL.createObjectURL(b); url = src }
     else full.p.then(bb => { if (bb && my === PT) swapIn(bb) });
   }
   if (NAT && EQ_OK === null) eqPrime(src ? streamUrl(t) : url);   // v24: never waits - the very first launch plays at once, the sound chain starts with the next song
-  clearInterval(fadeIv); fadeIv = null; fadeSet(0, true); srcCors = au.crossOrigin === 'anonymous';
+  if (FADE_END && Date.now() < FADE_END) { await new Promise(r => setTimeout(r, FADE_END - Date.now())); if (my !== PT) return }   // v23.10: the old song is quiet before the new one starts
+  FADE_END = 0; clearInterval(fadeIv); fadeIv = null; fadeSet(0, true); srcCors = au.crossOrigin === 'anonymous';
   { const mb = $('#mini-bar'); if (mb) { mb.style.transition = 'none'; mb.style.width = '0'; requestAnimationFrame(() => requestAnimationFrame(() => { mb.style.transition = '' })) } }
-  stallN = 0; PFAIL.n = 0; clearTimeout(stallT); clearTimeout(errT); clearTimeout(startWD); au.src = url; eqApply(); playNow(); fadeTo(1, 550);
+  STARTING = 0; stallN = 0; PFAIL.n = 0; clearTimeout(stallT); clearTimeout(errT); clearTimeout(startWD); au.src = url; eqApply(); playNow(); fadeTo(1, 550);
   startWD = setTimeout(() => { if (my === PT && !userPaused && !au.src.startsWith('blob:') && au.readyState < 3 && !au.error) recover('start') }, 10000);   // v24.5: nothing came in for 10 s -> load it again
   warmSoon();
   mediaMeta(t);
@@ -703,7 +725,6 @@ const act = {
   toggle() { if (mode() === 'phone') { if (!S.cur) return; if (au.paused) { userPaused = false; if (!au.getAttribute('src') || au.error) startPhone(false); else au.play() } else { userPaused = true; au.pause() } } else ctl(S.playing ? 'pause' : 'resume') },
   async next(auto) {
     if (mode() !== 'phone') return ctl('skip');
-    if (auto !== true && S.cur && !au.paused && !skipFade) { skipFade = true; await new Promise(r => fadeTo(0, 320, r)); skipFade = false }
     if (auto === true && S.rep === 'one') { au.currentTime = 0; au.play(); return }
     // FIX: skip/next inside a queue is NOT a user song-selection — don't add to RP
     if (S.qi + 1 < S.queue.length) { S.qi++; startPhone(false) }
@@ -738,7 +759,7 @@ au.addEventListener('pause', () => {
 });
 au.addEventListener('loadedmetadata', () => { mpos(true); nativeSync(true) });
 au.addEventListener('seeked', () => { mpos(true); nativeSync(true) });
-au.addEventListener('ended', () => act.next(true));
+au.addEventListener('ended', () => { if (starting()) return; act.next(true) });   // v23.8: the OLD song ending while a tapped song loads must not start another song
 au.addEventListener('timeupdate', () => {
   if (!document.hidden) { ui(true); mpos() }   // v23.4: in the background the 5 s watchdog below keeps the OS card in sync
   saveLast();
@@ -768,7 +789,7 @@ window.addEventListener('pageshow', msWake);
 window.addEventListener('focus', msWake);
 const altQ = t => [fb(t)].filter(x => x.trim());   // v24.3: only the SAME song (its own id, then its exact title + artist) - never another upload or spelling
 au.addEventListener('error', async () => {
-  if (!au.src) return;
+  if (!au.src || starting()) return;   // v23.8: the OLD source breaking while a tapped song loads is not about the new song
   const ct = S.cur;
   if (au.src.startsWith('blob:')) {   // v24.3: a broken downloaded / preloaded file -> forget it, play the song online (and download it again)
     if (!ct || ct._bx || mode() !== 'phone') return; ct._bx = 1; const bid = ytId(ct);
@@ -802,7 +823,7 @@ au.addEventListener('error', async () => {
 /* ───────── smooth playback: stall recovery ───────── */
 let stallT = 0, stallN = 0, errT = 0, startWD = 0; const PFAIL = { n: 0 };
 function recover(why) {
-  if (!au.src || au.src.startsWith('blob:') || !navigator.onLine || stallN >= 3) return false;
+  if (starting() || !au.src || au.src.startsWith('blob:') || !navigator.onLine || stallN >= 3) return false;
   stallN++; const pos = au.currentTime || 0, src = au.src;
   try { au.src = src; au.load(); const go = () => { au.removeEventListener('loadedmetadata', go); if (pos > 1) au.currentTime = pos; au.play().catch(() => {}) }; au.addEventListener('loadedmetadata', go) } catch (e) { return false }
   return true;
@@ -1673,6 +1694,7 @@ function carSet() {
   /* v23.6: if there is no next/previous song, hide the side covers completely instead of leaving two empty grey boxes */
   carEl.classList.toggle('solo', !pv && !nx);
 }
+{ const st = document.createElement('style'); st.textContent = '#np-car.fly .np-sl{transition:transform .45s cubic-bezier(.22,.7,.2,1)}'; document.head.appendChild(st) }   // v23.10: slow, smooth cover slide
 function goPrev(fromLock) { act.prev() }
 (() => {   // swipe the cover left / right = next / previous song
   let x0 = 0, y0 = 0, dx = 0, lock = 0, t0 = 0, w = 300, on = false;
@@ -1686,7 +1708,13 @@ function goPrev(fromLock) { act.prev() }
     const v = Math.abs(dx) / Math.max(1, Date.now() - t0), go = Math.abs(dx) > w * .28 || (v > .5 && Math.abs(dx) > 36), next = dx < 0;
     if (!go || (next && !S.queue[S.qi + 1] && !S.auto) || (!next && S.qi < 1)) { carEl.classList.add('fly'); set(0); return }
     carEl.classList.add('fly'); set(next ? -w : w);
-    setTimeout(() => { carEl.classList.remove('fly'); carEl.classList.add('snap'); set(0); if (next) act.next(); else goPrev(); requestAnimationFrame(() => requestAnimationFrame(() => carEl.classList.remove('snap'))) }, 300) };
+    try { if (S.cur && !au.paused && fadeM > .05) fadeTo(0, 380) } catch (e) {}   // v23.10: the song dims as the cover moves
+    setTimeout(() => {
+      try {   // v23.10: the new cover is put in the middle BEFORE it snaps back - the old cover no longer flashes for a second
+        const ia = $('#np-art'), sd = next ? imgN : imgP, od = next ? imgP : imgN;
+        if (ia && sd.getAttribute('src')) { const old = ia.src; ia.src = sd.src; od.style.visibility = ''; od.src = old; sd.style.visibility = 'hidden'; carKey = '' }
+      } catch (e) {}
+      carEl.classList.remove('fly'); carEl.classList.add('snap'); set(0); if (next) act.next(); else goPrev(); requestAnimationFrame(() => requestAnimationFrame(() => carEl.classList.remove('snap'))) }, 450) };
   carEl.addEventListener('touchend', end, { passive: true }); carEl.addEventListener('touchcancel', end, { passive: true });
 })();
 
