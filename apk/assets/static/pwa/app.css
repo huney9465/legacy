@@ -747,3 +747,22 @@ html.netbar-on{--nb:calc(28px + var(--sab))}
 #toast{translate:0 calc(-1 * var(--nb))}
 #np,#lyv,#sheet{bottom:var(--nb)}
 #view{margin-bottom:var(--nb)}
+
+/* v25.9 lighter: smaller blur, no per-row entrance animation */
+#np-bg{filter:blur(18px);transform:none;inset:0}
+#lyv-bg{filter:blur(14px);transform:none;inset:0}
+#view>*{animation:none!important}
+#view.pg-f,#view.pg-b{animation-duration:.25s}
+.sk{animation:none}
+/* artist circle + playlists under the player buttons */
+#np-ch{margin:18px 0 8px}
+#np-ch .ch-a{display:flex;align-items:center;gap:14px;width:100%;background:none;border:0;color:#fff;padding:4px 0;text-align:left}
+#np-ch .ch-c{flex:none;width:58px;height:58px;border-radius:50%;background:#2a2a2e center/cover no-repeat}
+#np-ch .ch-n b{display:block;font-size:16px;font-weight:700}
+#np-ch .ch-n small,#np-ch .ch-p>small{color:rgba(255,255,255,.6);font-size:12.5px}
+#np-ch .ch-p{margin-top:12px}
+#np-ch .ch-p h4{margin:0 0 8px;font-size:13px;font-weight:700;letter-spacing:.02em}
+#np-ch .ch-pl{display:flex;align-items:center;gap:12px;width:100%;background:none;border:0;color:#fff;padding:6px 0;text-align:left}
+#np-ch .ch-t{flex:none;width:46px;height:46px;border-radius:6px;background:#2a2a2e center/cover no-repeat}
+#np-ch .ch-pl b{display:block;font-size:14px;font-weight:600}
+#np-ch .ch-pl small{color:rgba(255,255,255,.6);font-size:12px}
