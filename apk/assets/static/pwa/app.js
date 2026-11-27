@@ -1,4 +1,4 @@
-/* Legacy Music app (v23.3). Installed app = plays in the phone. Website = plays in the Discord voice channel.
+/* Legacy Music app (v23.4). Installed app = plays in the phone. Website = plays in the Discord voice channel.
    v20: previous button, autoplay, lock-screen / notification-shade controls (Media Session), offline downloads (Premium),
         saved playlists, themes (Auto / Dark / White / AMOLED), update checker, sleep timer, repeat / shuffle, smarter search.
    v21: recently played row (songs + playlists), collaborative playlists (Premium, invite-link based),
@@ -16,7 +16,7 @@
    NOTE: bump CV below together with APP_VERSION in pwa.py on every release. */
 (() => {
 'use strict';
-const CV = '23.3';
+const CV = '23.4';
 /* APK mode: the Android app bundles these files and talks to the server over HTTPS with a token (window.LM_BASE is set by its index.html).
    On the website / installed PWA LM_BASE is empty and everything works exactly as before (cookie login, same origin). */
 const NAT = (typeof window.LM_BASE === 'string' && window.LM_BASE) ? window.LM_BASE.replace(/\/$/, '') : '';
@@ -73,6 +73,7 @@ const P = {
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 012-2h9"/>',
   shield: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/>',
   edit: '<path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>' };
+P.pause = '<path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/>'; P.stop = '<path d="M6 6l12 12M18 6L6 18"/>';
 const ic = (n, c = '') => `<svg class="i ${c}" viewBox="0 0 24 24">${P[n]}</svg>`;
 const L = {};
 const arr = x => Array.isArray(x) ? x : (x && (x.items || x.songs || x.playlists)) || [];
@@ -146,11 +147,37 @@ const DL_TICK = '<svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg>';
 const dlMark = id => !id ? '' : S.dl[id] ? `<span class="dl-ok">${DL_TICK}</span>` : (id in DLP ? `<span class="dl-ring${DLP[id] < 0 ? ' ind' : ''}" style="--p:${Math.max(0, DLP[id])}"></span>` : '');
 const dlSlot = id => { try { document.querySelectorAll('.dl-slot').forEach(s => { if (s.dataset.dlid === id) s.innerHTML = dlMark(id) }) } catch (e) {} };
 const dlProg = (id, p) => { DLP[id] = p; try { document.querySelectorAll('.dl-slot').forEach(s => { if (s.dataset.dlid !== id) return; const r = s.firstElementChild; if (r && r.classList.contains('dl-ring')) { r.classList.toggle('ind', p < 0); r.style.setProperty('--p', Math.max(0, p)) } else s.innerHTML = dlMark(id) }) } catch (e) {} };
-async function dlRead(r, id) {
+/* v24.5: pause / resume / cancel for one song and for a whole playlist download */
+const DLJ = {}, DLPL = {};   // DLJ: song id -> { ctl, paused, cancelled, pl } | DLPL: playlist key -> { paused, cancelled, total, done, name }
+const dlSleep = ms => new Promise(r => setTimeout(r, ms));
+const dlPaused = id => { const j = DLJ[id]; return !!j && (j.paused || !!(j.pl && DLPL[j.pl] && DLPL[j.pl].paused)) };
+const dlCancelled = id => !!(DLJ[id] && DLJ[id].cancelled);
+function dlSongCancel(id) { const j = DLJ[id]; if (!j) return; j.cancelled = true; try { j.ctl && j.ctl.abort() } catch (e) {} }
+function dlPlUi(k) {
+  try {
+    const p = DLPL[k], b = document.querySelector('[data-a="pl-dl"]'); if (!p || !b) return;
+    if (!location.hash.toUpperCase().includes(String(k).toUpperCase())) return;
+    b.innerHTML = `${ic('dl')} ${p.paused ? 'Paused' : 'Downloading'} ${p.done}/${p.total}`;
+  } catch (e) {}
+}
+function dlPlCancel(k) { const p = DLPL[k]; if (!p) return; p.cancelled = true; p.paused = false; Object.keys(DLJ).forEach(id => { if (DLJ[id].pl === k) dlSongCancel(id) }) }
+function dlSongSheet(id, title) {
+  const j = DLJ[id]; if (!j) return; const pa = dlPaused(id), pc = DLP[id] >= 0 ? ` · ${DLP[id]}%` : '';
+  sheet(`<h3>${esc(title || 'Song')}</h3><span class="sub">${pa ? 'Download paused' : 'Downloading'}${pc}</span><div class="menu">
+    <button data-a="dl-pause" data-id="${id}">${pa ? ic('play') + ' Resume download' : ic('pause') + ' Pause download'}</button>
+    <button data-a="dl-cancel" data-id="${id}">${ic('stop')} Cancel download</button></div>`);
+}
+function dlPlSheet(k, name) {
+  const p = DLPL[k]; if (!p) return;
+  sheet(`<h3>${esc(name || p.name || 'Playlist')}</h3><span class="sub">${p.paused ? 'Download paused' : 'Downloading'} · ${p.done}/${p.total} songs</span><div class="menu">
+    <button data-a="dlpl-pause" data-k="${esc(k)}">${p.paused ? ic('play') + ' Resume download' : ic('pause') + ' Pause download'}</button>
+    <button data-a="dlpl-cancel" data-k="${esc(k)}">${ic('stop')} Cancel download</button></div>`);
+}
+async function dlRead(r, id, kick) {
   let tot = 0; try { tot = +r.headers.get('content-length') || 0 } catch (e) {}
   if (!r.body || !r.body.getReader) return r.blob();
   const rd = r.body.getReader(), parts = []; let got = 0, ty = ''; try { ty = r.headers.get('content-type') || '' } catch (e) {}
-  for (;;) { const { done, value } = await rd.read(); if (done) break; parts.push(value); got += value.length; dlProg(id, tot ? Math.min(99, Math.round(got * 100 / tot)) : -1) }
+  for (;;) { const { done, value } = await rd.read(); if (done) break; parts.push(value); got += value.length; if (kick) kick(); while (dlPaused(id) && !dlCancelled(id)) { await dlSleep(300); if (kick) kick() } dlProg(id, tot ? Math.min(99, Math.round(got * 100 / tot)) : -1) }
   return new Blob(parts, ty ? { type: ty } : {});
 }
 const dlPlGet = () => { const a = jget('lm-dlpl', []); return Array.isArray(a) ? a : [] };
@@ -167,32 +194,65 @@ async function dlPlaylist(code, name, cover, tracks) {
   const all = (tracks || []).filter(x => ytId(x)); if (!all.length) return toast('No downloadable songs here');
   const todo = all.filter(x => !S.dl[ytId(x)]);
   if (!todo.length) { dlPlSave(code, name, cover, all); toast('Everything here is already downloaded'); return true }
-  let n = 0; for (const t of todo) { toast(`Downloading ${++n}/${todo.length}…`); if (!(await dlSong(t, true))) break }
+  const k = dlPlKey(code); if (DLPL[k]) return dlPlSheet(k, name);
+  /* v24.4: 3 songs download at the same time and one failed song no longer stops the playlist. v24.5: pause / resume / cancel */
+  const P_ = DLPL[k] = { paused: false, cancelled: false, total: todo.length, done: 0, name: name || '' };
+  let idx = 0, bad = 0, skipped = 0, stop = false; toast(`Downloading 0/${P_.total}…`); dlPlUi(k);
+  const DL_CONC = 4, warmed = new Set();
+  const warmFrom = i => { for (let k = i; k < Math.min(todo.length, i + DL_CONC * 2); k++) { const id = ytId(todo[k]); if (!id || warmed.has(id)) continue; warmed.add(id); ff(`/api/app/warm?v=${id}&av=${CV}`).catch(() => {}) } };   // the server starts preparing the next songs while the current ones download
+  const worker = async () => {
+    for (;;) {
+      await idleForPlay();
+      while (P_.paused && !P_.cancelled) await dlSleep(300);
+      if (stop || P_.cancelled || idx >= P_.total) return;
+      warmFrom(idx); const t = todo[idx++], ok = await dlSong(t, true, k);
+      if (ok) { P_.done++; if (!P_.paused) toast(`Downloading ${P_.done}/${P_.total}…`); dlPlUi(k) }
+      else if (ok === null) skipped++;
+      else if (++bad >= 4 && !P_.done) stop = true;
+    }
+  };
+  try { await Promise.all(Array.from({ length: DL_CONC }, worker)) } finally { delete DLPL[k] }
+  if (P_.cancelled) { toast('Download cancelled'); return false }
   if (all.every(x => S.dl[ytId(x)])) { dlPlSave(code, name, cover, all); toast('Playlist downloaded'); buzz(); return true }
-  toast('Download stopped. Try again to finish the playlist'); return false;
+  toast(skipped && !bad ? 'Some songs were skipped' : 'Download stopped. Try again to finish the playlist'); return false;
 }
 async function dlPlOffline(rec) {
   const m = await dlMeta(), by = {}; m.forEach(x => { by[x.id] = x });
   return { name: rec.name, code: rec.code, cover_image_url: rec.cover || '', is_owner: false, tracks: rec.ids.map(i => by[i]).filter(Boolean).map(x => ({ title: x.title, author: x.author, thumbnail: x.thumbnail, uri: x.uri, identifier: x.id, duration: x.duration })) };
 }
-async function dlSong(t, quiet) {
+async function dlSong(t, quiet, pl) {
   const id = ytId(t); if (!id) { if (!quiet) toast("This song can't be downloaded"); return false }
   if (S.dl[id]) { if (!quiet) toast('Already downloaded'); return true }
   if (!isPrem()) { premiumSheet('Downloading songs to listen offline is a Premium feature.'); return false }
   if (!navigator.onLine) { toast("You're offline"); return false }
+  if (DLJ[id]) return null;   // already downloading
+  const J = DLJ[id] = { ctl: null, paused: false, cancelled: false, pl: pl || '' };
   const b = $('#np-dl'); b && b.classList.add('busy'); if (!quiet) toast('Downloading…'); dlProg(id, 0);
   try {
-    const r = await ff(`/api/app/stream?v=${id}&dl=1&av=${CV}`);
-    if (r.status === 426) { showUpdate({ update_required: true }); return false }
-    if (r.status === 403) { premiumSheet('Downloading songs to listen offline is a Premium feature.'); return false }
-    if (!r.ok) throw new Error("Couldn't download this song");
-    const blob = await dlRead(r, id);
+    let blob = null;
+    for (let at = 0; at < 2 && !blob; at++) {
+      await idleForPlay();   // v24.4: a song that is starting to play always goes first
+      while (dlPaused(id) && !J.cancelled) await dlSleep(300);
+      if (J.cancelled) return null;
+      const ctl = J.ctl = new AbortController(); let wd = 0;
+      const fire = () => { if (J.cancelled || !dlPaused(id)) ctl.abort(); else wd = setTimeout(fire, 3000) };
+      wd = setTimeout(fire, 45000);
+      try {
+        const r = await ff(`/api/app/stream?v=${id}&dl=1&av=${CV}`, { signal: ctl.signal });
+        if (r.status === 426) { showUpdate({ update_required: true }); return false }
+        if (r.status === 403) { premiumSheet('Downloading songs to listen offline is a Premium feature.'); return false }
+        if (!r.ok) throw new Error("Couldn't download this song");
+        blob = await dlRead(r, id, () => { clearTimeout(wd); wd = setTimeout(fire, 25000) });   // no data for 25 s -> stop and try again
+      } catch (e) { blob = null; if (J.cancelled) return null; if (at === 1) throw e; dlProg(id, 0); await new Promise(r => setTimeout(r, 1500)) }
+      finally { clearTimeout(wd) }
+    }
+    if (J.cancelled) return null;
     await idbTx('songs', 'readwrite', s => s.put({ id, blob }));
     await idbTx('meta', 'readwrite', s => s.put({ id, title: t.title, author: t.author, thumbnail: art(t), duration: t.duration, size: blob.size, ts: Date.now(), uri: t.uri || `https://www.youtube.com/watch?v=${id}` }));
     delete DLP[id]; S.dl[id] = 1; dlSlot(id); ev('download', { ref: t.uri || id, title: t.title, author: t.author }); if (!quiet) toast('Downloaded · plays offline'); buzz(); try { navigator.storage && navigator.storage.persist && navigator.storage.persist() } catch (e) {}
     return true;
-  } catch (e) { if (!quiet) toast(e.message || 'Download failed'); return false }
-  finally { b && b.classList.remove('busy'); if (id in DLP) { delete DLP[id]; dlSlot(id) } ui() }
+  } catch (e) { if (J.cancelled) return null; if (!quiet) toast(e.message || 'Download failed'); return false }
+  finally { delete DLJ[id]; b && b.classList.remove('busy'); if (id in DLP) { delete DLP[id]; dlSlot(id) } ui() }
 }
 async function dlRemove(id) { ev('dl_rm', { ref: id }); await idbTx('songs', 'readwrite', s => s.delete(id)); await idbTx('meta', 'readwrite', s => s.delete(id)); delete S.dl[id] }
 
@@ -420,6 +480,12 @@ async function restoreLast() {
   if (src) { const go = () => { au.removeEventListener('loadedmetadata', go); try { if (S.rp > 1) au.currentTime = S.rp } catch (e) {} au.pause(); ui() }; au.addEventListener('loadedmetadata', go); au.src = src }
   mediaMeta(t); ui();
 }
+/* v24.4: playback has priority over downloads. While a song is starting (until it really plays, max 9 s) downloads wait,
+   so they can no longer fight the song for the connection / the server. */
+const PLAYGATE = { until: 0 };
+const playGateOpen = ms => { PLAYGATE.until = Date.now() + ms };
+const playGateClose = () => { PLAYGATE.until = 0 };
+const idleForPlay = async () => { for (let i = 0; i < 40 && Date.now() < PLAYGATE.until; i++) await new Promise(r => setTimeout(r, 250)) };
 async function startPhone(byUser, back) {
   const t = S.queue[S.qi]; if (!t) return; userPaused = false;
   const my = ++PT; if (byUser) HB.length = 0;   // v24.3: a song you start yourself has nothing before it
@@ -433,6 +499,7 @@ async function startPhone(byUser, back) {
   if (my !== PT) return;
   if (!src && !navigator.onLine) { toast("You're offline. Only downloaded songs play."); ui(); return }
   let url = src || streamUrl(t);
+  if (!src) playGateOpen(9000);
   try { CURP.ctl && CURP.ctl.abort() } catch (e) {} CURP.p = null; CURP.ctl = null;
   if (!src && mode() === 'phone' && !(navigator.connection && navigator.connection.saveData)) {
     clearInterval(fadeIv); fadeIv = null; fadeSet(0, true); mediaMeta(t); ui();      // the old song goes quiet, the new one is shown while it loads
@@ -445,7 +512,8 @@ async function startPhone(byUser, back) {
   if (NAT && EQ_OK === null) eqPrime(src ? streamUrl(t) : url);   // v24: never waits - the very first launch plays at once, the sound chain starts with the next song
   clearInterval(fadeIv); fadeIv = null; fadeSet(0, true); srcCors = au.crossOrigin === 'anonymous';
   { const mb = $('#mini-bar'); if (mb) { mb.style.transition = 'none'; mb.style.width = '0'; requestAnimationFrame(() => requestAnimationFrame(() => { mb.style.transition = '' })) } }
-  stallN = 0; clearTimeout(stallT); au.src = url; eqApply(); playNow(); fadeTo(1, 550);
+  stallN = 0; PFAIL.n = 0; clearTimeout(stallT); clearTimeout(errT); clearTimeout(startWD); au.src = url; eqApply(); playNow(); fadeTo(1, 550);
+  startWD = setTimeout(() => { if (my === PT && !userPaused && !au.src.startsWith('blob:') && au.readyState < 3 && !au.error) recover('start') }, 10000);   // v24.5: nothing came in for 10 s -> load it again
   warmSoon();
   mediaMeta(t);
   // push to recently played — only when user explicitly chose this song
@@ -462,6 +530,7 @@ function playNow() {
   const p = au.play();
   if (p && p.catch) p.catch(e => {
     if (e && e.name === 'AbortError') return;            // a newer song took over, nothing to do
+    if (e && e.name !== 'NotAllowedError') return;   // v24.4: a failed load is handled by the 'error' handler (retry, then next) - not a "tap play" problem
     toast('Tap play to start');
     const go = () => { if (!userPaused && au.paused) au.play().catch(() => {}) };
     document.addEventListener('touchstart', go, { once: true, capture: true }); document.addEventListener('click', go, { once: true, capture: true });
@@ -569,7 +638,7 @@ function playFrom(list, i, asQueue, whole) {
 async function ctl(a, body) { if (!S.gid) return toast('Join a voice channel in Discord first'); try { await api(`/api/guilds/${S.gid}/${a}`, { method: 'POST', body: body || undefined }); poll() } catch (e) { toast(e.message) } }
 let userPaused = false, resumeT = null, skipFade = false;
 const act = {
-  toggle() { if (mode() === 'phone') { if (!S.cur) return; if (au.paused) { userPaused = false; if (!au.getAttribute('src')) startPhone(false); else au.play() } else { userPaused = true; au.pause() } } else ctl(S.playing ? 'pause' : 'resume') },
+  toggle() { if (mode() === 'phone') { if (!S.cur) return; if (au.paused) { userPaused = false; if (!au.getAttribute('src') || au.error) startPhone(false); else au.play() } else { userPaused = true; au.pause() } } else ctl(S.playing ? 'pause' : 'resume') },
   async next(auto) {
     if (mode() !== 'phone') return ctl('skip');
     if (auto !== true && S.cur && !au.paused && !skipFade) { skipFade = true; await new Promise(r => fadeTo(0, 320, r)); skipFade = false }
@@ -599,7 +668,7 @@ au.addEventListener('pause', () => {
   ui();
   /* v23.2: headset mic / voice chat / Bluetooth switching to call mode makes Android pause the song for a moment. It was NOT paused by the user,
      so we start it again by ourselves (retries for ~5 s only, so a real phone call is not interrupted for long). */
-  if (!userPaused && S.cur && !au.ended && mode() === 'phone' && !(au.duration && au.duration - au.currentTime < .4)) {
+  if (!userPaused && S.cur && !au.ended && au.readyState >= 2 && !au.error && mode() === 'phone' && !(au.duration && au.duration - au.currentTime < .4)) {
     clearTimeout(resumeT); const t0 = Date.now();
     const tryResume = n => { if (userPaused || !au.paused || Date.now() - t0 > 15000) return; au.play().catch(() => {}); resumeT = setTimeout(() => tryResume(n + 1), n < 2 ? 700 : 1500) };
     resumeT = setTimeout(() => tryResume(0), 450);
@@ -646,17 +715,29 @@ au.addEventListener('error', async () => {
     stallN = 0; clearTimeout(stallT); au.src = streamUrl(ct); playNow(); return;
   }
   if (au.crossOrigin === 'anonymous' && !AX && !corsRetried) { corsRetried = true; EQ_OK = false; srcCors = false; store.set('lm-eq-cors', '0'); store.set('lm-eq-ts', String(Date.now())); au.removeAttribute('crossorigin'); const s0 = au.src; au.src = s0; au.load(); au.play().catch(() => {}); return }
-  try { const r = await fetch(au.src, { headers: { Range: 'bytes=0-0' }, credentials: NAT ? 'omit' : 'same-origin' }); if (r.status === 426) return showUpdate({ update_required: true }) } catch (e) {}
+  let st = 0; try { const r = await fetch(au.src, { headers: { Range: 'bytes=0-0' }, credentials: NAT ? 'omit' : 'same-origin' }); st = r.status; if (st === 426) return showUpdate({ update_required: true }) } catch (e) {}
   /* v24.3: the file was not found -> find the same song again by itself: by name, then with other spellings, before giving up */
   if (ct) { const tries = ytId(ct) ? altQ(ct) : altQ(ct).slice(1); if ((ct._f || 0) < tries.length) { const qq = tries[ct._f++]; stallN = 0; clearTimeout(stallT); au.src = withMt(U(`/api/app/stream?q=${encodeURIComponent(qq.slice(0, 150))}&av=${CV}&hq=${isPrem() ? 1 : 0}`)); playNow(); return } }
-  if (recover('error')) return;
-  /* v24.2: no "couldn't play / skipping" popups any more - just quietly move on to the next track */
-  if (++failRun >= 4) { failRun = 0; userPaused = true; ui(); return }
+  /* v24.5: a song that fails to LOAD (busy server, weak network, a download running) is tried again on the SAME song with growing waits
+     (1.5 / 3 / 5 / 8 / 12 s). It never jumps to the next song because of that. Only a song that really does not exist any more (404 / 410)
+     is skipped, and never more than 3 in a row. If all tries fail we stay on the song and wait for the person to tap play. */
+  const gone = st === 404 || st === 410;
+  if (!gone && ct && ct === S.cur) {
+    if (!navigator.onLine) { userPaused = true; ui(); return }
+    const wait = [1500, 3000, 5000, 8000, 12000][PFAIL.n++];
+    if (wait) {
+      clearTimeout(errT); const s0 = au.src, c0 = S.cur;
+      errT = setTimeout(() => { if (S.cur !== c0 || userPaused || !navigator.onLine) return; stallN = 0; try { au.src = s0; au.load() } catch (e) {} playNow() }, wait);
+      return;
+    }
+    PFAIL.n = 0; userPaused = true; ui(); toast("Couldn't load this song. Tap play to try again"); return;
+  }
+  if (++failRun >= 3) { failRun = 0; userPaused = true; ui(); return }
   setTimeout(() => act.next(), 400);
 });
 
 /* ───────── smooth playback: stall recovery ───────── */
-let stallT = 0, stallN = 0;
+let stallT = 0, stallN = 0, errT = 0, startWD = 0; const PFAIL = { n: 0 };
 function recover(why) {
   if (!au.src || au.src.startsWith('blob:') || !navigator.onLine || stallN >= 3) return false;
   stallN++; const pos = au.currentTime || 0, src = au.src;
@@ -679,7 +760,7 @@ async function smoothSwap() {
 au.addEventListener('waiting', () => { clearTimeout(stallT); clearTimeout(swT); swT = setTimeout(() => { if (!au.paused && au.readyState < 3) smoothSwap() }, 1800); stallT = setTimeout(() => { if (!au.paused && au.readyState < 3) recover('stall') }, 6500) });
 ['playing', 'canplay', 'pause', 'emptied'].forEach(e => au.addEventListener(e, () => { clearTimeout(stallT); clearTimeout(swT) }));
 document.addEventListener('visibilitychange', () => { if (document.hidden) setTimeout(() => { if (document.hidden && S.playing && !fullyLoaded()) smoothSwap() }, 1500) });
-au.addEventListener('playing', () => { failRun = 0; if (au.currentTime > 5) stallN = 0 });
+au.addEventListener('playing', () => { playGateClose(); failRun = 0; PFAIL.n = 0; clearTimeout(errT); clearTimeout(startWD); if (au.currentTime > 5) stallN = 0 });
 
 /* v23.4: NO automatic resume. If a call, reel, video or another app takes the audio, the song stays paused until the user taps play. */
 
@@ -1465,7 +1546,7 @@ async function playlist(code) {
       ${(p.is_owner || p.collab) && code !== 'liked' && isPrem() ? `<button class="btn ghost" data-a="pl-edit" data-pid="${p.id}" data-code="${esc(up)}">${ic('edit')} Edit</button>` : ''}
       <button class="btn ghost" data-a="pl-copy" data-code="${esc(up)}">${ic('copy')} Share</button>
       ${shareCollabBtn}
-      <button class="btn ghost${dlPlDone(L.pl) ? ' dl-done' : ''}" data-a="pl-dl">${dlPlDone(L.pl) ? '<span class="dl-ok">' + DL_TICK + '</span> Downloaded' : ic('dl') + ' Download ' + (isPrem() ? '' : ic('crown', 'gold'))}</button></div>
+      <button class="btn ghost${dlPlDone(L.pl) ? ' dl-done' : ''}" data-a="pl-dl">${dlPlDone(L.pl) ? '<span class="dl-ok">' + DL_TICK + '</span> Downloaded' : (DLPL[dlPlKey(up)] ? ic('dl') + ' ' + (DLPL[dlPlKey(up)].paused ? 'Paused' : 'Downloading') + ' ' + DLPL[dlPlKey(up)].done + '/' + DLPL[dlPlKey(up)].total : ic('dl') + ' Download ' + (isPrem() ? '' : ic('crown', 'gold')))}</button></div>
       ${collabBadge}` +
       (L.pl.length ? L.pl.map((x, i) => songRow('pl', i, x, moreBtn('pl', i))).join('') : '<div class="empty">This playlist is empty</div>') + collabLine;
   } catch (e) { if (my === RT) view.innerHTML = `<div class="empty">${esc(e.message)}</div>` }
@@ -2083,7 +2164,7 @@ document.addEventListener('click', async e => {
       <button data-a="plm-play" data-code="${esc(c)}">${ic('play')} Play</button>
       <button data-a="plm-share" data-code="${esc(c)}" data-name="${esc(nm)}">${ic('copy')} Share</button>
       <button data-a="plm-like" data-code="${esc(c)}">${ic('heart')} Like all songs</button>
-      <button data-a="plm-dl" data-code="${esc(c)}">${ic('dl')} Download ${isPrem() ? '' : ic('crown', 'gold')}</button>
+      ${DLPL[dlPlKey(c)] ? `<button data-a="dlpl-pause" data-k="${esc(dlPlKey(c))}">${DLPL[dlPlKey(c)].paused ? ic('play') + ' Resume download' : ic('pause') + ' Pause download'} · ${DLPL[dlPlKey(c)].done}/${DLPL[dlPlKey(c)].total}</button><button data-a="dlpl-cancel" data-k="${esc(dlPlKey(c))}">${ic('stop')} Cancel download</button>` : `<button data-a="plm-dl" data-code="${esc(c)}">${ic('dl')} Download ${isPrem() ? '' : ic('crown', 'gold')}</button>`}
       ${own && el.dataset.pid ? `<button data-a="plm-del" data-pid="${esc(el.dataset.pid)}" data-code="${esc(c)}">${ic('lock')} Delete playlist</button>` : ''}
       ${!own ? `<button data-a="plm-unsave" data-code="${esc(c)}">${ic('bookmark')} Remove from library</button>` : ''}</div>`);
     return;
@@ -2097,7 +2178,7 @@ document.addEventListener('click', async e => {
       <button data-a="add-plus" data-l="${el.dataset.l}" data-i="${i}">${ic('music')} Add to playlist ${isPrem() ? '' : ic('crown', 'gold')}</button>
       <button data-a="more-by" data-q="${esc(t.author)}">${ic('radio')} Song radio (more like this)</button>
       ${t.author ? `<button data-a="open-artist" data-name="${esc(t.author)}">${ic('person')} Artist: ${esc(t.author)}</button>` : ''}
-      ${id ? (dlon ? `<button data-a="dl-rm" data-id="${id}">${ic('dl')} Remove download</button>` : `<button data-a="dl-it" data-l="${el.dataset.l}" data-i="${i}">${ic('dl')} Download ${isPrem() ? '' : ic('crown', 'gold')}</button>`) : ''}
+      ${id ? (dlon ? `<button data-a="dl-rm" data-id="${id}">${ic('dl')} Remove download</button>` : DLJ[id] ? `<button data-a="dl-pause" data-id="${id}">${dlPaused(id) ? ic('play') + ' Resume download' : ic('pause') + ' Pause download'}${DLP[id] >= 0 ? ' · ' + DLP[id] + '%' : ''}</button><button data-a="dl-cancel" data-id="${id}">${ic('stop')} Cancel download</button>` : `<button data-a="dl-it" data-l="${el.dataset.l}" data-i="${i}">${ic('dl')} Download ${isPrem() ? '' : ic('crown', 'gold')}</button>`) : ''}
       <button data-a="share-it" data-l="${el.dataset.l}" data-i="${i}">${ic('copy')} Copy</button>
       ${own ? `<button data-a="rm-track" data-id="${t.id}">${ic('lock')} Remove from this playlist</button>` : ''}</div>`); return
   }
@@ -2134,7 +2215,11 @@ document.addEventListener('click', async e => {
   else if (a === 'artist-shuffle') { playFrom((L.artist || []).slice().sort(() => Math.random() - .5), 0, true, true) }
   else if (a === 'pl-back') { if (history.length > 1) history.back(); else location.hash = '#home' }
   else if (a === 'dl-it') { closeSheet(); dlSong(nt(list[i])) }
-  else if (a === 'dl') { if (S.cur) { const id = ytId(S.cur); if (id && S.dl[id]) { await dlRemove(id); toast('Download removed'); ui() } else dlSong(S.cur) } }
+  else if (a === 'dl-pause') { const j = DLJ[el.dataset.id]; closeSheet(); if (j) { j.paused = !j.paused; toast(j.paused ? 'Download paused' : 'Download resumed') } }
+  else if (a === 'dl-cancel') { closeSheet(); if (DLJ[el.dataset.id]) { dlSongCancel(el.dataset.id); toast('Download cancelled') } }
+  else if (a === 'dlpl-pause') { const p = DLPL[el.dataset.k]; closeSheet(); if (p) { p.paused = !p.paused; dlPlUi(el.dataset.k); toast(p.paused ? 'Download paused' : 'Download resumed') } }
+  else if (a === 'dlpl-cancel') { closeSheet(); if (DLPL[el.dataset.k]) dlPlCancel(el.dataset.k) }
+  else if (a === 'dl') { if (S.cur) { const id = ytId(S.cur); if (id && DLJ[id]) return dlSongSheet(id, S.cur.title); if (id && S.dl[id]) { await dlRemove(id); toast('Download removed'); ui() } else dlSong(S.cur) } }
   else if (a === 'dl-rm') { closeSheet(); await dlRemove(el.dataset.id); toast('Download removed'); if (location.hash.startsWith('#downloads')) route(); else ui() }
   else if (a === 'dl-play') { if (L.dl && L.dl.length) playFrom(L.dl, 0, true, false) }
   else if (a === 'dl-clear') { if (await askYes('Delete all downloaded songs from this phone?', 'Delete')) { for (const x of (await dlMeta())) await dlRemove(x.id); toast('Downloads deleted'); route() } }
@@ -2143,6 +2228,7 @@ document.addEventListener('click', async e => {
   else if (a === 'pl-dl') {
     const m = L.plMeta || {}, hc = (location.hash.match(/^#code\/([^?\/]+)/) || [])[1] || m.code || '';
     if (!hc) return toast("Can't download this playlist");
+    if (DLPL[dlPlKey(hc)]) return dlPlSheet(dlPlKey(hc), (L.plMeta || {}).name);
     await dlPlaylist(hc, m.name, fixUrl(m.cover_image_url) || '', L.pl || []); if (location.hash.startsWith('#code/')) route();
   }
   else if (a === 'pl-save') {
@@ -2504,7 +2590,7 @@ function nativeSync(force) {
 window.lmCmd = c => {          // lock screen + notification buttons (the Android MediaSession sends these)
   c = String(c || '');
   if (c === 'toggle') act.toggle();
-  else if (c === 'play') { userPaused = false; au.play().catch(() => {}) }
+  else if (c === 'play') { userPaused = false; if (!au.getAttribute('src') || au.error) startPhone(false); else au.play().catch(() => {}) }
   else if (c === 'pause') { userPaused = true; au.pause() }
   else if (c === 'next') act.next(); else if (c === 'prev') goPrev(true);
   else if (c === 'like') { if (S.cur) likeToggle(S.cur) }
