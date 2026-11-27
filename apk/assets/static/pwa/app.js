@@ -1,4 +1,6 @@
-/* v25.8: the next song comes in as ONE request that is read slowly, starting 15-40 s (auto) before the end and finishing ~1.5 s before it: the chunks run ahead, the song follows, no burst.
+/* v25.9: LESS LAG: no song-piece writing to the phone, next song = ONE slow request, starts only when 5.5 s of the current song are left, lighter blur/animations, notifications every 2 min.
+   New on Now Playing: artist circle + channel link, the artist's playlists (or 'There is no playlist of this song'), album name behind the singer.
+   v25.8: the next song comes in as ONE request that is read slowly, starting 15-40 s (auto) before the end and finishing ~1.5 s before it: the chunks run ahead, the song follows, no burst.
    v25.7: fewer requests = less lag: 2 requests per next song (head + rest), cache pieces >= 32 KB, one write round per second in the background.
    v25.6: CHUNKS RUN AHEAD, THE SONG FOLLOWS. Chunk size / lead are auto-detected all the time from the real network speed, RAM (deviceMemory, JS heap) and
    saveData (adp()). Next song: nothing while the song plays; ~4 s before the end only a small HEAD piece (30-100 KB), the rest in small Range pieces
@@ -414,7 +416,7 @@ let HOLD_T = 0, PRE_EARLY = 0;   // v25.5: HOLD_T = a next / previous was presse
 const holdUi = () => !!HOLD_T && Date.now() - HOLD_T < 2500;
 function holdStart() { HOLD_T = Date.now(); setTimeout(() => { if (HOLD_T && Date.now() - HOLD_T >= 2500) { HOLD_T = 0; try { ui() } catch (e) {} } }, 2600) }
 const PRE_AT = 4;   // (v25.8: only used as the last-moment limit; the next song now starts earlier and slowly: preAt())
-const preAt = () => { const a = adp(); return a.slow ? 40 : a.bw > 1250000 ? 15 : 25 };   // seconds before the end when the next song starts coming in (one request, read slowly)   // v25.4: the NEXT song starts downloading when this many seconds of the current song are left
+const preAt = () => 5.5;   // v25.9: starts only ~10 s before the end (25 s on a slow net), ONE slow request   // seconds before the end when the next song starts coming in (one request, read slowly)   // v25.4: the NEXT song starts downloading when this many seconds of the current song are left
 function preSchedule() {   // v25.4: called from timeupdate; fires preloadNext() at ~PRE_AT s left even if the background wakes us only every few seconds
   if (PRE.sched || PRE.busy || !(au.duration > 0) || !isFinite(au.duration)) return;
   const rem = au.duration - au.currentTime, at = preAt(); if (rem > at + 7 || rem <= 0) return;
@@ -589,6 +591,7 @@ async function ccGet(url) {
   } catch (e) { return null }
 }
 async function ccPut(url, b) {
+  return;   // v25.9: song pieces are no longer written to the phone (disk work = lag). Old saved pieces are still read.
   try {
     if (!window.caches || !b || b.size < 50000 || b.size > CC_ONE) return;
     const c = navigator.connection; if (c && c.saveData) return;
@@ -1551,7 +1554,7 @@ function annNext() {
   } catch (e) { annShowing = false; annNext() }
 }
 let lastNotifAt = 0;
-setInterval(() => { if (document.hidden) return; lastNotifAt = Date.now(); loadNotifs() }, 20000);   // v24.6: not in the background
+setInterval(() => { if (document.hidden) return; lastNotifAt = Date.now(); loadNotifs() }, 120000);   // v25.9: every 2 min (was 20 s): not in the background
 document.addEventListener('visibilitychange', () => { if (!document.hidden && Date.now() - lastNotifAt > 3000) { lastNotifAt = Date.now(); loadNotifs() } });
 
 /* v23.2: the website needs permission before it can put a notification in the phone's bar.
@@ -2589,12 +2592,48 @@ $('#np-lcard').dataset.a = 'lyrics-full'; $('#np-lyr').dataset.a = 'lyrics-full'
   const el = e.target && (e.target.nodeType === 3 ? e.target.parentElement : e.target);
   if (el && el.closest && el.closest('#lyv,#np-lcard,#np-lyr,.lyfull,#pan-lyr')) { e.preventDefault(); if (e.clipboardData) { try { e.clipboardData.setData('text/plain', '') } catch (x) {} } }
 }, true));
-function artistCard(t) {
-  const c = $('#np-acard'); if (!c || !t.author) { if (c) c.hidden = true; return }
-  const nm = t.author.split(/[,&]/)[0].trim(), fol = isFollowing(nm), th = art(t);
-  c.hidden = false;
-  c.innerHTML = `<b class="ct">About the artist</b><button class="aa" data-a="open-artist" data-name="${esc(nm)}" style="${bgi(th)}"></button>
-    <div class="ar"><div><b>${esc(nm)}</b><small>Artist</small></div><button class="pillbtn" data-a="artist-follow" data-name="${esc(nm)}" data-thumb="${esc(th)}"><span>${fol ? 'Following' : 'Follow'}</span></button></div>`;
+/* v25.9: Now Playing, under the buttons: the artist in a circle (official picture) + name -> tap opens the artist; below it the artist's playlists, or "There is no playlist of this song". */
+const CHC = new Map();
+async function chInfo(nm) {
+  if (CHC.has(nm)) return CHC.get(nm);
+  const o = { name: nm, thumb: '', url: '', pls: [] };
+  try {
+    const d = await api('/api/music/search?query=' + encodeURIComponent(nm));
+    const a = arr(d.artists).find(x => akey(x.name) === akey(nm)) || arr(d.artists)[0];
+    if (a) {
+      o.name = a.name || nm; o.thumb = fixUrl(a.thumbnail) || '';
+      const id = String(a.channelId || a.channel_id || a.browseId || a.id || '');
+      if (/^UC[\w-]{20,}$/.test(id)) o.url = 'https://www.youtube.com/channel/' + id; else if (a.url && /^https?:/.test(a.url)) o.url = a.url;
+    }
+    const pl = d.playlists || d.playlist || [];
+    o.pls = (Array.isArray(pl) ? pl : []).filter(p => p && (p.title || p.name)).slice(0, 8);
+  } catch (e) { return o }   // not cached on error: tried again next time
+  CHC.set(nm, o); return o;
+}
+const plWeb = p => { const id = String(p.playlistId || p.browseId || p.id || '').replace(/^VL/, ''); return /^(PL|OL|RD|UU|LL|FL)[\w-]+$/.test(id) ? 'https://www.youtube.com/playlist?list=' + id : (p.url && /^https?:/.test(p.url) ? p.url : '') };
+async function artistCard(t) {
+  const c = $('#np-ch'); if (!c) return;
+  if (!t || !t.author) { c.hidden = true; return }
+  const nm = t.author.split(/\s*(?:,|&|\sx\s|\sft\.?\s|\sfeat\.?\s)\s*/i)[0].trim(); if (!nm) { c.hidden = true; return }
+  const key = preKey(t), th0 = art(t);
+  c.hidden = false; c.dataset.k = key;
+  c.innerHTML = `<button class="ch-a" data-a="ch-open" data-name="${esc(nm)}"><span class="ch-c" style="${bgi(th0)}"></span><span class="ch-n"><b>${esc(nm)}</b><small>Artist</small></span></button><div class="ch-p"><small>Loading…</small></div>`;
+  const o = await chInfo(nm);
+  if (c.dataset.k !== key) return;   // another song is playing now
+  const th = o.thumb || th0;
+  const pls = o.pls.map(p => { const u = plWeb(p); return `<button class="ch-pl" data-a="ch-pl" data-url="${esc(u)}"><span class="ch-t" style="${bgi(fixUrl(p.thumbnail || p.cover || p.thumb) || th)}"></span><span><b>${esc(p.title || p.name)}</b><small>Playlist</small></span></button>` }).join('');
+  c.innerHTML = `<button class="ch-a" data-a="ch-open" data-name="${esc(nm)}" data-url="${esc(o.url)}"><span class="ch-c" style="${bgi(th)}"></span><span class="ch-n"><b>${esc(o.name || nm)}</b><small>Artist</small></span></button>` +
+    (pls ? `<div class="ch-p"><h4>Playlists</h4>${pls}</div>` : `<div class="ch-p"><small>There is no playlist of this song</small></div>`);
+  albumLine(t, nm, key);
+}
+async function albumLine(t, nm, key) {   // singer name + album behind it, e.g. "Sidhu Moose Wala · Drippy"
+  try {
+    if (!t.title || t.album) return;
+    const r = await ituSong(nm + ' ' + (t.title || '').replace(/\(.*?\)|\[.*?\]|\|.*$/g, '').trim());
+    const h = r.find(x => sameArtist(x.artist, nm) && x.album && x.album.name); if (!h) return;
+    if (!S.cur || preKey(S.cur) !== key) return;
+    const e = $('#np-s'); if (e) e.textContent = t.author + ' · ' + h.album.name;
+  } catch (e) {}
 }
 /* ───────── copy (replaces "link"/"share" wording: everything just says Copy) ───────── */
 async function copyText(txt, msg) {
@@ -2684,6 +2723,8 @@ document.addEventListener('click', async e => {
   else if (a === 'share-it') { closeSheet(); const tt = nt(list[i]); ev('share', { ref: tt.uri, title: tt.title, author: tt.author }); copyText(songLink(tt), 'Copied') }
   else if (a === 'share') { if (S.cur) shareSong(S.cur) }
   else if (a === 'more-by') { const qq = el.dataset.q; closeSheet(); afterSheet(() => { S.chips.clear(); location.hash = '#search'; setTimeout(() => search(qq), 30) }) }
+  else if (a === 'ch-open') { const u = el.dataset.url, nm = el.dataset.name; if (u) { if (bridge && bridge.open) bridge.open(u); else window.open(u, '_blank') } else if (nm) { closeNP(); setTimeout(() => { location.hash = '#artist/' + encodeURIComponent(nm) }, 150) } }
+  else if (a === 'ch-pl') { const u = el.dataset.url; if (u) { if (bridge && bridge.open) bridge.open(u); else window.open(u, '_blank') } else toast('Playlist not available') }
   else if (a === 'open-artist') { const nm = el.dataset.name; closeSheet(); afterSheet(() => { location.hash = '#artist/' + encodeURIComponent(nm) }) }
   else if (a === 'artist-follow') { const on = artistToggle(el.dataset.name, el.dataset.thumb); ev(on ? 'follow' : 'unfollow', { ref: el.dataset.name, thumb: noMt(el.dataset.thumb || '') }); el.classList.toggle('ghost', on); el.querySelector('span').textContent = on ? 'Following' : 'Follow'; toast(on ? 'Following ' + el.dataset.name : 'Unfollowed ' + el.dataset.name); buzz() }
   else if (a === 'artist-play') { playFrom(L.artist || [], 0, true, true); S.ctx = (L.artist && L.artist[0] && L.artist[0].author) || S.ctx }
