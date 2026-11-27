@@ -1,4 +1,5 @@
-/* v25.12: the playing song STREAMS (no whole-song copy in RAM, no big download): much less RAM and internet while a game runs.
+/* v25.13: leaving the app releases the cover pictures from memory; old saved song pieces deleted.
+   v25.12: the playing song STREAMS (no whole-song copy in RAM, no big download): much less RAM and internet while a game runs.
    v25.11: next song = only one tiny 16 KB request at 5.5 s left (server warm-up), nothing else.
    v25.10: chunk loader removed completely: nothing is loaded in advance, the next song loads when it starts.
    v25.9: LESS LAG: no song-piece writing to the phone, next song = ONE slow request, starts only when 5.5 s of the current song are left, lighter blur/animations, notifications every 2 min.
@@ -118,7 +119,7 @@ const bgi = u => { const s = (u == null || u === 'null' || u === 'undefined' || 
 const art = t => t.thumbnail || (ytId(t) ? `https://i.ytimg.com/vi/${ytId(t)}/mqdefault.jpg` : '/static/pwa/icon-192.png');
 /* v25 Data saver (default ON): lowest audio quality asked from the server, small covers only (a maxres cover is 100-300 KB, 3 of them per song = as much as the sound) */
 const dsOn = () => store.get('lm-ds') !== '0';
-const artHi = t => dsOn() ? art(t) : ytId(t) ? `https://i.ytimg.com/vi/${ytId(t)}/maxresdefault.jpg` : art(t);
+const artHi = t => dsOn() ? art(t) : ytId(t) ? `https://i.ytimg.com/vi/${ytId(t)}/hqdefault.jpg` : art(t);   // v25.14: 480x360 (was 1280x720 maxres: 4x the memory + data per song, also for the notification card)
 const fixUrl = u => { if (!u || u === 'null' || u === 'undefined') return null; u = noMt(String(u).trim()); if (!u) return null; if (/^(data:|blob:)/i.test(u)) return u; if (/^https?:/i.test(u)) return withMt(u); if (u.startsWith('//')) return withMt(location.protocol + u); return withMt((NAT || location.origin) + (u.startsWith('/') ? '' : '/') + u) };
 const buzz = n => { if (S.haptic && navigator.vibrate) navigator.vibrate(n || 12) };
 let tm; const toast = m => { const e = $('#toast'); e.textContent = m; e.classList.add('on'); clearTimeout(tm); tm = setTimeout(() => e.classList.remove('on'), 3200) };
@@ -3330,4 +3331,24 @@ setTimeout(() => { try { if (!view.innerHTML.trim()) view.innerHTML = '<div clas
     let rl = false; navigator.serviceWorker.addEventListener('controllerchange', () => { if (!rl && updShown) { rl = true; location.reload() } });
   }
 })();
+
+/* v25.13: when you leave the app (game, home screen) the big cover pictures are released from the phone's memory after 2 s and put back when you return;
+   the old saved song pieces (not used any more since v25.10) are deleted once. Less memory and disk work next to a game. */
+try { if (window.caches) caches.delete('lm-chunks-v1'); store.set(CC_IDX, '{}') } catch (e) {}
+let TRIM_T = 0;
+document.addEventListener('visibilitychange', () => {
+  clearTimeout(TRIM_T);
+  if (document.hidden) {
+    TRIM_T = setTimeout(() => {
+      if (!document.hidden) return;
+      try {
+        ['np-art', 'np-art-p', 'np-art-n', 'mini-art'].forEach(i => { const e = document.getElementById(i); if (e && e.getAttribute('src')) e.removeAttribute('src') });
+        const bg = document.getElementById('np-bg'); if (bg) bg.style.backgroundImage = 'none';
+        HEAVYK = ''; carKey = '';
+      } catch (e) {}
+    }, 2000);
+  } else {
+    try { HEAVYK = ''; carKey = ''; const t = S.cur, m = document.getElementById('mini-art'); if (t && m && !m.getAttribute('src')) m.src = art(t); ui() } catch (e) {}
+  }
+});
 })();
