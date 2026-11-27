@@ -1,4 +1,4 @@
-/* Legacy Music app (v23.4). Installed app = plays in the phone. Website = plays in the Discord voice channel.
+/* Legacy Music app (v23.7 = v23.6 + chunk cache). Installed app = plays in the phone. Website = plays in the Discord voice channel.
    v20: previous button, autoplay, lock-screen / notification-shade controls (Media Session), offline downloads (Premium),
         saved playlists, themes (Auto / Dark / White / AMOLED), update checker, sleep timer, repeat / shuffle, smarter search.
    v21: recently played row (songs + playlists), collaborative playlists (Premium, invite-link based),
@@ -16,7 +16,7 @@
    NOTE: bump CV below together with APP_VERSION in pwa.py on every release. */
 (() => {
 'use strict';
-const CV = '23.4';
+const CV = '23.6';
 /* APK mode: the Android app bundles these files and talks to the server over HTTPS with a token (window.LM_BASE is set by its index.html).
    On the website / installed PWA LM_BASE is empty and everything works exactly as before (cookie login, same origin). */
 const NAT = (typeof window.LM_BASE === 'string' && window.LM_BASE) ? window.LM_BASE.replace(/\/$/, '') : '';
@@ -392,9 +392,12 @@ async function preloadNext() {
   if (!fullyLoaded() && !(au.currentTime > 8 || (au.duration > 0 && au.buffered.length && au.buffered.end(au.buffered.length - 1) >= au.duration * .5))) return;   // v23.2: earlier than before (was 20 s / 70 %)
   const my = PT; PRE.busy = key; PRE.ctl = new AbortController();
   try {
-    const r = await fetch(streamUrl(n), { credentials: NAT ? 'omit' : 'same-origin', signal: PRE.ctl.signal });
-    if (!r.ok) throw 0;
-    const b = await r.blob();
+    const nu = streamUrl(n); let b = await ccGet(nu);   // v23.7: the saved chunks first
+    if (!b) {
+      const r = await fetch(nu, { credentials: NAT ? 'omit' : 'same-origin', signal: PRE.ctl.signal });
+      if (!r.ok) throw 0;
+      b = await r.blob(); if (b && b.size >= 50000) ccPut(nu, b);
+    }
     if (my !== PT || S.queue[S.qi + 1] !== n || b.size < 50000 || !/^(audio|video)\/|octet/.test(b.type || 'audio/')) throw 0;
     if (PRE.url) { try { URL.revokeObjectURL(PRE.url) } catch (e) {} }
     PRE.url = URL.createObjectURL(b); PRE.key = key;
@@ -444,10 +447,53 @@ const HB = [];
    or the screen being off cannot make it stutter (a normal <audio> stream stops loading in the background = the stuttering).
    Very slow network (> LOAD_WAIT) -> it starts streaming at once and is swapped to the memory copy as soon as that is complete. */
 const LOAD_WAIT = 3000, CURP = { my: 0, p: null, ctl: null };
+/* v23.7: CHUNK CACHE (online only). Every song that is played is also kept on the phone in small pieces (256 KB chunks, Cache Storage).
+   The next time the same song is played it is built from those pieces = it starts at once and needs (almost) no network - it can not stop or stutter.
+   It is NOT a download: it is not shown in Downloads, it is not available offline (offline still plays only real downloads), and the oldest songs
+   are removed by themselves when the cache is over CC_MAX. Writing is slow and in the background, and waits until the song is really playing. */
+const CC_NAME = 'lm-chunks-v1', CC_CH = 262144, CC_MAX = 150 * 1024 * 1024, CC_IDX = 'lm-cc-idx', CC_ONE = 40 * 1024 * 1024;
+const ccKey = url => { try { const u = new URL(url, location.href), g = k => u.searchParams.get(k) || ''; return (g('v') ? 'v:' + g('v') : 'q:' + g('q')) + '|hq' + g('hq') + '|ds' + g('ds') } catch (e) { return '' } };
+const ccIdx = () => { try { const o = JSON.parse(store.get(CC_IDX) || '{}'); return o && typeof o === 'object' ? o : {} } catch (e) { return {} } };
+const ccSave = o => { try { store.set(CC_IDX, JSON.stringify(o)) } catch (e) {} };
+const ccUrl = (key, i) => '/__lmc/' + encodeURIComponent(key) + '/' + i;
+const ccBusy = new Set();
+async function ccDelete(cache, key, n) { for (let i = 0; i < n; i++) { try { await cache.delete(ccUrl(key, i)) } catch (e) {} } }
+async function ccGet(url) {
+  try {
+    if (!window.caches) return null; const key = ccKey(url); if (!key) return null;
+    const idx = ccIdx(), e = idx[key]; if (!e || !e.n) return null;
+    const cache = await caches.open(CC_NAME), parts = [];
+    for (let i = 0; i < e.n; i++) { const r = await cache.match(ccUrl(key, i)); if (!r) { delete idx[key]; ccSave(idx); ccDelete(cache, key, e.n); return null } parts.push(await r.blob()) }
+    const b = new Blob(parts, { type: e.type || 'audio/mp4' });
+    if (b.size !== e.size) { delete idx[key]; ccSave(idx); ccDelete(cache, key, e.n); return null }
+    e.t = Date.now(); idx[key] = e; ccSave(idx); return b;
+  } catch (e) { return null }
+}
+async function ccPut(url, b) {
+  try {
+    if (!window.caches || !b || b.size < 50000 || b.size > CC_ONE) return;
+    const c = navigator.connection; if (c && c.saveData) return;
+    const key = ccKey(url); if (!key || ccBusy.has(key) || ccIdx()[key]) return; ccBusy.add(key);
+    try {
+      await idleForPlay(); await new Promise(r => setTimeout(r, 1500));   // never fight the song that is starting
+      const cache = await caches.open(CC_NAME), n = Math.ceil(b.size / CC_CH);
+      for (let i = 0; i < n; i++) {
+        await cache.put(ccUrl(key, i), new Response(b.slice(i * CC_CH, (i + 1) * CC_CH)));
+        if (i % 4 === 3) await new Promise(r => setTimeout(r, 40));         // small pieces, the player is never blocked
+      }
+      const idx = ccIdx(); idx[key] = { n, size: b.size, type: b.type || 'audio/mp4', t: Date.now() };
+      let tot = 0; for (const k in idx) tot += idx[k].size || 0;
+      while (tot > CC_MAX) { const old = Object.keys(idx).filter(k => k !== key).sort((x, y) => (idx[x].t || 0) - (idx[y].t || 0))[0]; if (!old) break; tot -= idx[old].size || 0; await ccDelete(cache, old, idx[old].n); delete idx[old] }
+      ccSave(idx);
+    } finally { ccBusy.delete(key) }
+  } catch (e) {}
+}
+window.lmClearChunkCache = async () => { try { await caches.delete(CC_NAME); ccSave({}); return true } catch (e) { return false } };
 function fullFetch(url) {
   const ctl = new AbortController();
-  const p = fetch(url, { credentials: NAT ? 'omit' : 'same-origin', signal: ctl.signal }).then(r => r.ok ? r.blob() : null)
+  const net = () => fetch(url, { credentials: NAT ? 'omit' : 'same-origin', signal: ctl.signal }).then(r => r.ok ? r.blob() : null)
     .then(b => (b && b.size >= 50000 && /^(audio|video)\/|octet/.test(b.type || 'audio/')) ? b : null).catch(() => null);
+  const p = ccGet(url).then(hit => hit || net().then(b => { if (b) ccPut(url, b); return b }));   // v23.7: the saved chunks first, the network only if they are missing
   return { p, ctl };
 }
 function swapIn(b) {
@@ -526,16 +572,32 @@ async function startPhone(byUser, back) {
 let loadingMore = false, failRun = 0, lastMoreMs = 0;
 // FIX: minimum gap between moreLikeThis calls (10 s) to prevent spam when the app fires it rapidly
 const MORE_COOLDOWN_MS = 10000;
+/* v23.6: a song that was told to play must never just sit there stopped.
+   play() can be refused for a moment (audio focus busy, WebView not ready, another stream still closing).
+   We try again by ourselves a few times; only if it still does not start, we say "Tap play" and wait for ONE tap. */
+const WANT = { t: 0, n: 0 };
 function playNow() {
+  WANT.t = Date.now(); WANT.n = 0;
   const p = au.play();
   if (p && p.catch) p.catch(e => {
     if (e && e.name === 'AbortError') return;            // a newer song took over, nothing to do
-    if (e && e.name !== 'NotAllowedError') return;   // v24.4: a failed load is handled by the 'error' handler (retry, then next) - not a "tap play" problem
-    toast('Tap play to start');
-    const go = () => { if (!userPaused && au.paused) au.play().catch(() => {}) };
-    document.addEventListener('touchstart', go, { once: true, capture: true }); document.addEventListener('click', go, { once: true, capture: true });
+    if (e && e.name !== 'NotAllowedError') return;       // a failed load is handled by the 'error' handler (retry, then next)
+    [350, 900, 1800, 3200].forEach(ms => setTimeout(() => { if (!userPaused && au.paused && S.cur && !au.error) au.play().catch(() => {}) }, ms));
+    setTimeout(() => {
+      if (userPaused || !au.paused || !S.cur) return;
+      toast('Tap play to start');
+      const go = () => { if (!userPaused && au.paused) au.play().catch(() => {}) };
+      document.addEventListener('touchstart', go, { once: true, capture: true }); document.addEventListener('click', go, { once: true, capture: true });
+    }, 4000);
   });
 }
+/* v23.6 watchdog: for the first 30 s of every song, if it is not userPaused but the player is stopped, start it again (every 2 s, max 8 tries) */
+setInterval(() => {
+  if (!WANT.t || userPaused || !S.cur || mode() !== 'phone' || !au.paused || au.ended || !au.getAttribute('src')) return;
+  const age = Date.now() - WANT.t; if (age < 2500 || age > 30000 || WANT.n >= 8 || au.error) return;
+  WANT.n++; au.play().catch(() => {});
+}, 2000);
+au.addEventListener('playing', () => { WANT.n = 0 });
 const streamUrlQ = t => withMt(U(`/api/app/stream?q=${encodeURIComponent(fb(t).slice(0, 150))}&av=${CV}&hq=${isPrem() ? 1 : 0}`));
 // Keywords that signal lofi/cover/fan-made content
 const FAKE_KWORDS = ['lofi', 'lo-fi', 'lo fi', 'slowed', 'slow +', 'slow and', 'reverb', 'nightcore', 'sped up', 'speed up', '8d audio', '8d', 'bass boosted', 'bassboosted', 'ai cover', '(ai)', '\u00a0(ai)', ' ai ', 'remake', 'recreat', 'cover by', ' cover)', '(cover', 'cover version', 'tribute', 'karaoke', 'instrumental', 'fan made', 'fan-made', 'mashup', 'mash-up', 'remix', 'status video', 'whatsapp status', 'shorts', 'reaction', 'reprise'];
@@ -715,13 +777,14 @@ au.addEventListener('error', async () => {
     stallN = 0; clearTimeout(stallT); au.src = streamUrl(ct); playNow(); return;
   }
   if (au.crossOrigin === 'anonymous' && !AX && !corsRetried) { corsRetried = true; EQ_OK = false; srcCors = false; store.set('lm-eq-cors', '0'); store.set('lm-eq-ts', String(Date.now())); au.removeAttribute('crossorigin'); const s0 = au.src; au.src = s0; au.load(); au.play().catch(() => {}); return }
-  let st = 0; try { const r = await fetch(au.src, { headers: { Range: 'bytes=0-0' }, credentials: NAT ? 'omit' : 'same-origin' }); st = r.status; if (st === 426) return showUpdate({ update_required: true }) } catch (e) {}
+  let st = 0; try { const pc = new AbortController(), r = await fetch(au.src, { headers: { Range: 'bytes=0-0' }, credentials: NAT ? 'omit' : 'same-origin', signal: pc.signal }); st = r.status; try { pc.abort() } catch (e) {} if (st === 426) return showUpdate({ update_required: true }) } catch (e) {}   // v23.6: the probe is closed at once - an open probe used up one of the server's stream slots
   /* v24.3: the file was not found -> find the same song again by itself: by name, then with other spellings, before giving up */
   if (ct) { const tries = ytId(ct) ? altQ(ct) : altQ(ct).slice(1); if ((ct._f || 0) < tries.length) { const qq = tries[ct._f++]; stallN = 0; clearTimeout(stallT); au.src = withMt(U(`/api/app/stream?q=${encodeURIComponent(qq.slice(0, 150))}&av=${CV}&hq=${isPrem() ? 1 : 0}`)); playNow(); return } }
   /* v24.5: a song that fails to LOAD (busy server, weak network, a download running) is tried again on the SAME song with growing waits
      (1.5 / 3 / 5 / 8 / 12 s). It never jumps to the next song because of that. Only a song that really does not exist any more (404 / 410)
      is skipped, and never more than 3 in a row. If all tries fail we stay on the song and wait for the person to tap play. */
   const gone = st === 404 || st === 410;
+  if (st === 429 && ct && ct === S.cur) { preDrop(); try { CURP.ctl && CURP.ctl.abort() } catch (e) {} PFAIL.n = Math.min(PFAIL.n, 1) }   // v23.6: server says 'too many open' -> free our own extra streams first, then retry the same song
   if (!gone && ct && ct === S.cur) {
     if (!navigator.onLine) { userPaused = true; ui(); return }
     const wait = [1500, 3000, 5000, 8000, 12000][PFAIL.n++];
@@ -781,8 +844,9 @@ async function eqProbe(url) {
   if (fresh && c === '1') { EQ_OK = true; au.crossOrigin = 'anonymous'; return }
   let slow = false;
   try {
-    const r = await Promise.race([fetch(url, { headers: { Range: 'bytes=0-1' } }), new Promise((_, j) => setTimeout(() => { slow = true; j() }, 3500))]);
-    EQ_OK = !!(r && (r.ok || r.status === 206)); try { r.body && r.body.cancel() } catch (e) {}
+    const pc = new AbortController();
+    const r = await Promise.race([fetch(url, { headers: { Range: 'bytes=0-1' }, signal: pc.signal }), new Promise((_, j) => setTimeout(() => { slow = true; try { pc.abort() } catch (e) {} j() }, 3500))]);
+    EQ_OK = !!(r && (r.ok || r.status === 206)); try { r.body && r.body.cancel() } catch (e) {} try { pc.abort() } catch (e) {}
   } catch (e) { EQ_OK = false }
   if (!slow) { store.set('lm-eq-cors', EQ_OK ? '1' : '0'); store.set('lm-eq-ts', String(Date.now())) }   // a timeout is only for this session
   if (EQ_OK) au.crossOrigin = 'anonymous';
