@@ -1,0 +1,21 @@
+--- /tmp/origrepo/tools/inject_java.py	2026-11-27 23:29:58.000000000 +0000
++++ userproj/tools/inject_java.py	2026-11-28 00:44:09.362510258 +0000
+@@ -105,6 +105,18 @@
+     m = re.search(r'<service\b[^>]*android:name="com\.legacymusic\.app\.PlaybackService"[^>]*?/>', t)
+     assert m, "PlaybackService <service> not found in manifest"
+     t = t[:m.end() - 2] + ' android:stopWithTask="false"' + t[m.end() - 2:]
++# v23.8-fix4: Android 16 Live Updates (the status-bar chip with the song name) need this non-runtime
++# permission, otherwise the system refuses to promote the notification. On older Android it is
++# simply an unknown permission and is ignored.
++if "POST_PROMOTED_NOTIFICATIONS" not in t:
++    m = re.search(r'<uses-permission\b[^>]*?/>', t)
++    perm = '\n    <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS"/>'
++    if m:
++        t = t[:m.end()] + perm + t[m.end():]
++    else:
++        m = re.search(r'<application\b', t)
++        assert m, "<application> not found in manifest"
++        t = t[:m.start()] + perm.lstrip("\n") + "\n    " + t[m.start():]
+ if "MediaButtonRx" not in t:
+     rx = ('\n        <receiver android:enabled="true" android:exported="true" android:name="com.legacymusic.app.MediaButtonRx">'
+           '\n            <intent-filter>\n                <action android:name="android.intent.action.MEDIA_BUTTON"/>'

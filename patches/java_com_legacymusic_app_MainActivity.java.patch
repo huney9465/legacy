@@ -1,0 +1,114 @@
+--- /tmp/origrepo/java/com/legacymusic/app/MainActivity.java	2026-11-27 23:29:58.000000000 +0000
++++ userproj/java/com/legacymusic/app/MainActivity.java	2026-11-28 00:44:12.842510424 +0000
+@@ -85,6 +85,9 @@
+     private static WebView sWeb;
+     private static WebViewAssetLoader sLoader;
+     private static boolean sLoaded;
++    /* v23.8-fix4: the user tapped the Android 16 status-bar chip / the media card. The song must
++       start playing, so the request is remembered until the page is ready and then handed to JS. */
++    private static boolean sPlayReq;
+     private static String sToken;
+     /** commands that arrived before the page was ready (e.g. lock-screen "next" right after a reload) */
+     private static final ArrayDeque<String> sCmdQ = new ArrayDeque<String>();
+@@ -187,7 +190,12 @@
+            more, so the 1 s JS tick, the preload and the media-session sync keep running. */
+         if (Build.VERSION.SDK_INT >= 26) {
+             try {
+-                w.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true);
++                /* v23.8-fix2 (BUG 2A - the real one). The 2nd argument is waivedWhenNotVisible.
++                   `true` means: "as soon as this WebView is not visible, give its renderer priority up".
++                   A music app is ALWAYS not visible while the song plays in the background, so the old
++                   value threw the renderer to the back of the queue exactly when the audio thread needed
++                   CPU the most -> the stutter / lag in the background. It must be `false`. */
++                w.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);
+             } catch (Throwable t) { Log.w(TAG, "renderer priority", t); }
+         }
+         sLoaded = false;
+@@ -245,19 +253,29 @@
+ 
+     @Override
+     protected void onDestroy() {
+-        /* Bug 1: NOTHING here may stop the service or the song.
+-           - the old code called PlaybackService.update(ctx,"","",false) -> stopService()
+-           - the old code called web.destroy() unconditionally
+-           Both are gone. */
+         if (updateDone != null) {
+             try { unregisterReceiver(updateDone); } catch (Exception ignored) { }
+             updateDone = null;
+         }
+         if (sAct == this) sAct = null;
+ 
++        /* v23.8-fix2 - the rule the user asked for:
++             • Home button / screen off / Back to the launcher  -> Activity is NOT finishing -> music continues
++             • swiped away from Recents (or "close app")        -> Activity IS finishing    -> music STOPS
++           `isFinishing()` is the only reliable difference between those two cases. A rotation or a
++           theme change also destroys the Activity, but isFinishing() is false there, so the song
++           survives it. */
++        boolean finishing = isFinishing();
++
++        if (finishing) {
++            Log.i(TAG, "Activity is finishing (swiped from Recents) - stopping playback");
++            try { PlaybackService.stopNow(this); } catch (Exception e) { Log.w(TAG, "stopNow", e); }
++        }
++
+         if (sWeb != null) {
+-            if (PlaybackService.isPlaying()) {
+-                /* keep the WebView (and the audio) alive; just take it off the dying window */
++            if (!finishing && PlaybackService.isPlaying()) {
++                /* the window is going away but the task is still alive: keep the WebView (and the audio),
++                   only take it off the dying window so it can be put back on the next one */
+                 try {
+                     if (sWeb.getParent() instanceof android.view.ViewGroup) {
+                         ((android.view.ViewGroup) sWeb.getParent()).removeView(sWeb);
+@@ -265,7 +283,7 @@
+                 } catch (Exception e) { Log.w(TAG, "detach", e); }
+                 Log.i(TAG, "Activity destroyed - WebView kept alive, music continues");
+             } else {
+-                /* nothing is playing: free the memory */
++                /* finishing, or nothing is playing: free the memory */
+                 try {
+                     if (sWeb.getParent() instanceof android.view.ViewGroup) {
+                         ((android.view.ViewGroup) sWeb.getParent()).removeView(sWeb);
+@@ -292,6 +310,15 @@
+ 
+     private void handleIntent(Intent i) {
+         if (i == null) return;
++        /* v23.8-fix4: "play the song" request from the status-bar chip / the media card. It is
++           handled before the auth deep link because the chip intent has no data URI at all. */
++        try {
++            if (i.getBooleanExtra(PlaybackService.EXTRA_PLAY, false)) {
++                i.removeExtra(PlaybackService.EXTRA_PLAY);
++                sPlayReq = true;
++                deliverPlay();
++            }
++        } catch (Exception e) { Log.w(TAG, "play extra", e); }
+         Uri data = i.getData();
+         if (data == null) return;
+         if (!"legacymusic".equals(data.getScheme()) || !"auth".equals(data.getHost())) return;
+@@ -301,6 +328,18 @@
+         deliverToken();
+     }
+ 
++    /** v23.8-fix4: hands the "start playing" request to the page (once it is loaded). */
++    private static void deliverPlay() {
++        if (!sPlayReq || !sLoaded) return;
++        sPlayReq = false;
++        MainActivity a = sAct;
++        if (a != null) a.js("try{window.LMPlayFromChip&&window.LMPlayFromChip()}catch(e){}");
++        else if (sWeb != null) {
++            try { sWeb.evaluateJavascript("try{window.LMPlayFromChip&&window.LMPlayFromChip()}catch(e){}", null); }
++            catch (Exception ignored) { }
++        }
++    }
++
+     private void deliverToken() {
+         String t = sToken;
+         if (t == null || !sLoaded) return;
+@@ -525,6 +564,7 @@
+             MainActivity a = sAct;
+             if (a != null) a.deliverToken();
+             flushCmd();
++            deliverPlay();   // v23.8-fix4: the chip was tapped before the page was ready
+         }
+ 
+         /**
