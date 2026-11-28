@@ -1,0 +1,167 @@
+--- a/apk/assets/static/pwa/app.js
++++ b/apk/assets/static/pwa/app.js
+@@ -121,6 +121,31 @@
+ const dsOn = () => store.get('lm-ds') !== '0';
+ const artHi = t => dsOn() ? art(t) : ytId(t) ? `https://i.ytimg.com/vi/${ytId(t)}/hqdefault.jpg` : art(t);   // v25.14: 480x360 (was 1280x720 maxres: 4x the memory + data per song, also for the notification card)
+ const fixUrl = u => { if (!u || u === 'null' || u === 'undefined') return null; u = noMt(String(u).trim()); if (!u) return null; if (/^(data:|blob:)/i.test(u)) return u; if (/^https?:/i.test(u)) return withMt(u); if (u.startsWith('//')) return withMt(location.protocol + u); return withMt((NAT || location.origin) + (u.startsWith('/') ? '' : '/') + u) };
++/* v23.8-fix2 (BUG 3 - the white square in the notification / lock-screen card).
++   The native side was given the cover URL with the media token STRIPPED (`noMt`), so its own download got
++   a 403 and no bitmap -> the card showed a white/empty square. The page is the only side that has the
++   session cookie + the token, and it already displays the exact same picture. So it reads the picture
++   itself (once per song) and hands it to the service as a small base64 JPEG (~20-40 KB). Nothing is
++   downloaded twice and no token is needed on the native side. */
++const ART = { key: '', data: '', busy: '' };
++const artKey = t => t ? ((t.uri || '') + '|' + (ytId(t) || '') + '|' + (t.thumbnail || '')) : '';
++async function prepArt(t) {
++  if (!NAT || !t) return;
++  const k = artKey(t); if (!k || ART.key === k || ART.busy === k) return;
++  ART.busy = k;
++  try {
++    const u = fixUrl(artHi(t)) || fixUrl(art(t)); if (!u) return;
++    const r = await fetch(u, { credentials: 'omit', mode: 'cors' });
++    if (!r.ok) return;
++    const b = await r.blob();
++    if (!b || b.size < 200 || b.size > 1500000) return;
++    const d = await new Promise(res => { const fr = new FileReader(); fr.onload = () => res(String(fr.result || '')); fr.onerror = () => res(''); fr.readAsDataURL(b) });
++    if (!d || d.length < 120 || !d.startsWith('data:image')) return;
++    if (artKey(t) !== k) return;                 // another song took over meanwhile
++    ART.key = k; ART.data = d;
++    nativeSync(true);                            // push it to the service at once
++  } catch (e) {} finally { if (ART.busy === k) ART.busy = '' }
++}
+ const buzz = n => { if (S.haptic && navigator.vibrate) navigator.vibrate(n || 12) };
+ let tm; const toast = m => { const e = $('#toast'); e.textContent = m; e.classList.add('on'); clearTimeout(tm); tm = setTimeout(() => e.classList.remove('on'), 3200) };
+ /* v23.4: network status strip at the bottom (like YouTube / Chrome): "You are now offline" stays while there is no internet,
+@@ -428,7 +453,32 @@
+   const my = PT; PRE.sched = setTimeout(() => { PRE.sched = 0; if (my === PT) preloadNext() }, Math.max(0, (rem - at) * 1000));
+ }
+ const preKey = t => t && (ytId(t) || t.uri || '');
+-function preDrop() { try { PRE.ctl && PRE.ctl.abort() } catch (e) {} PRE.ctl = null; PRE.busy = ''; if (PRE.url) { try { URL.revokeObjectURL(PRE.url) } catch (e) {} } PRE.url = ''; PRE.key = '' }
++/* v23.8-fix2 (BUG 2B/2C + RAM): the next song is prepared by a SECOND, hidden <audio> element, not by a
++   JS download. Why this is the real fix:
++     • the old way pulled the whole next song (up to 40 MB) into the JS heap as Blob pieces. On a 1-2 GB
++       phone that means a big allocation + garbage collection right in the middle of the current song =
++       exactly the stutter/lag the user hears, and it also competes with the song that is playing.
++     • it was paced with setTimeout(). In the background Chromium throttles those timers to ~1/minute,
++       so the "slow trickle" turned into nothing at all -> every track boundary had to open a new stream.
++     • a media element loads on its own native thread: no JS heap, no timers, no throttling. Chromium
++       keeps one shared media cache per renderer, so when the current song ends and we point `au` at the
++       same URL, the data is already there -> the next song starts at once.
++   Memory: nothing is kept in JS. The media cache holds a small window and drops it by itself. */
++const pre = (() => {
++  try {
++    const el = document.createElement('audio');
++    el.id = 'pre'; el.preload = 'auto'; el.muted = true; el.volume = 0;
++    el.setAttribute('playsinline', '');
++    el.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;opacity:0;pointer-events:none';
++    document.body.appendChild(el);
++    return el;
++  } catch (e) { return null }
++})();
++function preDrop() {
++  try { PRE.ctl && PRE.ctl.abort() } catch (e) {}
++  PRE.ctl = null; PRE.busy = ''; PRE.url = ''; PRE.key = '';
++  try { if (pre) { pre.removeAttribute('src'); pre.load() } } catch (e) {}
++}
+ function fullyLoaded() {
+   try { if (au.src && au.src.startsWith('blob:')) return true; if (!(au.duration > 0) || !au.buffered.length) return false; return au.buffered.end(au.buffered.length - 1) >= au.duration - 1.5 } catch (e) { return false }
+ }
+@@ -486,34 +536,27 @@
+ }
+ /* v25.11: the chunk loader is now only a tiny touch: ONE small request (16 KB) when 5.5 s are left, so the server has the next song ready. Nothing is kept in memory, nothing is written. */
+ const WN = { key: '' };
+-/* v23.8-fix (BUG 2B + BUG 2C): the next song is really PRE-BUFFERED now, in the background too.
++/* v23.8-fix2 (BUG 2B + BUG 2C): the next song is really PRE-BUFFERED now, in the background too.
+    The old code did `if (... || document.hidden) return` - so while the screen was off / another app was
+    in front NOTHING was prepared, and every track boundary had to open a new network stream = the gap
+-   and the stutter the user hears. In the foreground it only fetched 16 KB and threw it away, which the
+-   <audio> element can never use anyway.
+-   Now: warm ping -> rangeLoad() -> PRE.url (a blob). startPhone() already starts a song from PRE.url
+-   instantly, so the next track begins with no gap. Only ONE song is held in RAM, capped by CC_ONE, and
+-   the blob is revoked as soon as the song is playing. */
++   and the stutter the user hears.
++   Now: warm ping -> the hidden <audio id="pre"> loads the next stream natively. startPhone() gives that
++   same URL to the player, so the next track begins with no gap and with no second download. Nothing is
++   kept in the JS heap (the old version held the whole song as a Blob = up to 40 MB = GC stutter). */
+ async function preloadNext() {
+   try {
+     if (mode() !== 'phone' || !S.cur || !navigator.onLine) return;   // BUG 2B: no document.hidden here
+     const c = navigator.connection; if (c && c.saveData) return;
+-    if (PRE.busy) return;
++    if (!pre) return;
+     const n = S.queue[S.qi + 1]; if (!n) return;
+     const key = preKey(n); if (!key || PRE.key === key || (ytId(n) && S.dl[ytId(n)])) return;
+     const rem = (au.duration > 0 && isFinite(au.duration)) ? au.duration - au.currentTime : 9999;
+     if (rem > preAt() + 2 || !(au.currentTime >= 4)) return;
+     const id = ytId(n);
+     if (id) { try { await ff(`/api/app/warm?v=${id}&av=${CV}`) } catch (e) {} }
+-    const my = PT, ctl = new AbortController(); PRE.busy = key; PRE.ctl = ctl;
+-    const live = () => !ctl.signal.aborted && ((my === PT && S.queue[S.qi + 1] === n) || S.cur === n);
+-    try {
+-      const b = await rangeLoad(streamUrl(n), ctl.signal, live, n, false);
+-      if (!live() || !b || b.size < 50000) return;
+-      if (PRE.url) { try { URL.revokeObjectURL(PRE.url) } catch (e) {} }
+-      PRE.url = URL.createObjectURL(b); PRE.key = key;
+-    } catch (e) {}
+-    finally { if (PRE.ctl === ctl) { PRE.busy = ''; PRE.ctl = null } }
++    const url = streamUrl(n);
++    PRE.key = key; PRE.url = url;
++    try { pre.src = url; pre.load() } catch (e) {}
+   } catch (e) {}
+ }
+ /* v23.8-fix (BUG 6): preloadNextOld() was dead code - nothing called it, and it depended on
+@@ -691,13 +734,16 @@
+   const id = ytId(t); let src = '';
+   if (id && S.dl[id]) { try { const r = await idbTx('songs', 'readonly', s => s.get(id)); if (r && r.blob) { if (blobUrl) URL.revokeObjectURL(blobUrl); src = blobUrl = URL.createObjectURL(r.blob) } } catch (e) {} }
+   if (!src && id && S.dl[id]) { delete S.dl[id]; if (isPrem() && navigator.onLine) setTimeout(() => dlSong(t, true), 5000) }   // v24.3: the downloaded file is missing -> play it online and download it again by itself
+-  if (!src && PRE.busy && PRE.busy === preKey(t) && !PRE.url) { for (let i = 0; i < (byUser ? 24 : 40) && PRE.busy === preKey(t) && !PRE.url; i++) await new Promise(r => setTimeout(r, 125)); if (my !== PT) return }   // v25.4: its download is already running (started ~4 s before) - wait for it, no second download
+-  if (!src && PRE.url && PRE.key === preKey(t)) { if (blobUrl) { try { URL.revokeObjectURL(blobUrl) } catch (e) {} } src = blobUrl = PRE.url; PRE.url = ''; PRE.key = '' }
++  /* v23.8-fix2: the next song was already loaded by the hidden <audio id="pre">. Its URL is handed to
++     the player directly - Chromium's media cache already holds the data, so it starts with no gap and
++     without a second download. (No Blob any more -> no 40 MB in the JS heap.) */
++  let preSrc = '';
++  if (!src && PRE.url && PRE.key === preKey(t)) preSrc = PRE.url;
+   else if (PRE.key !== preKey(t)) preDrop();
+   if (my !== PT) return;
+   if (!src && !navigator.onLine) { STARTING = 0; toast("You're offline. Only downloaded songs play."); ui(); return }
+-  let url = src || streamUrl(t);
+-  if (!src) playGateOpen(9000);
++  let url = src || preSrc || streamUrl(t);
++  if (!src && !preSrc) playGateOpen(9000);
+   try { CURP.ctl && CURP.ctl.abort() } catch (e) {} CURP.p = null; CURP.ctl = null;
+   if (false && !src && mode() === 'phone' && !(navigator.connection && navigator.connection.saveData)) {   // v25.12: OFF - the song is no longer loaded whole into the phone's memory, it streams (like Spotify)
+     if (!FADE_END || Date.now() >= FADE_END) { clearInterval(fadeIv); fadeIv = null; fadeSet(0, true) } mediaMeta(t); ui();      // the old song dims (v23.10: not cut), the new one is shown while it loads
+@@ -712,9 +758,13 @@
+   FADE_END = 0; clearInterval(fadeIv); fadeIv = null; fadeSet(0, true); srcCors = au.crossOrigin === 'anonymous';
+   { const mb = $('#mini-bar'); if (mb) { mb.style.transition = 'none'; mb.style.width = '0'; requestAnimationFrame(() => requestAnimationFrame(() => { mb.style.transition = '' })) } }
+   STARTING = 0; stallN = 0; PFAIL.n = 0; clearTimeout(stallT); clearTimeout(errT); clearTimeout(startWD); au.src = url; eqApply(); playNow(); fadeTo(1, 550);
++  /* v23.8-fix2: the player has taken the preloaded URL over. Let the hidden element go, otherwise it
++     would keep buffering the same file next to the player (double network on a slow connection). */
++  if (preSrc) { try { pre.removeAttribute('src'); pre.load() } catch (e) {} PRE.url = ''; PRE.key = ''; }
+   startWD = setTimeout(() => { if (my === PT && !userPaused && !au.src.startsWith('blob:') && au.readyState < 3 && !au.error) recover('start') }, 10000);   // v24.5: nothing came in for 10 s -> load it again
+   warmSoon();
+   mediaMeta(t);
++  prepArt(t);            // v23.8-fix2: give the notification the real cover (base64), not a 403 URL
+   // push to recently played — only when user explicitly chose this song
+   rpPush('song', { title: t.title, author: t.author, uri: t.uri, thumbnail: art(t) }, !!byUser);
+   const h = jget('lm-hist', []); h.unshift({ a: t.author, t: t.title }); store.set('lm-hist', JSON.stringify(h.slice(0, 30)));
+@@ -915,6 +965,10 @@
+   if (!document.hidden) { ui(true); mpos() }   // v23.4: in the background the 5 s watchdog below keeps the OS card in sync
+   saveLast();
+   preSchedule();   // v25.4: next song = one download when ~4 s are left
++  /* v23.8-fix2: do not depend on that timer any more. In the background Chromium throttles setTimeout,
++     so the preload could start far too late (or never). timeupdate keeps firing while the song plays,
++     so the hidden <audio id="pre"> is fed from here as well - preloadNext() is a no-op if it is ready. */
++  if (au.duration > 0 && isFinite(au.duration) && au.duration - au.currentTime <= preAt() + 1) preloadNext();
+   if (navigator.onLine && Date.now() - lastWarmChk > (document.hidden ? 15000 : 4000)) {   // v24.6 lag fix: background = checked every 15 s, and the next song is fetched only in the last 60 s of this one
+     lastWarmChk = Date.now();
+     if (document.hidden) { if (au.duration > 0 && au.duration - au.currentTime <= 30) warmAhead(); return }   // v25.4: background = only a tiny 'get ready' ping in the last 30 s
+@@ -3123,7 +3177,7 @@
+   const t = S.cur, liked = !!(t && S.liked[t.uri]);
+   const k = t ? [t.title, t.author, S.playing ? 1 : 0, liked ? 1 : 0, S.shuf ? 1 : 0, (typeof spd === 'function' ? spd() : 1), Math.floor(au.currentTime || 0)].join('|') : '';   // v23.8-fix (BUG 3): 1 s resolution, was a 15 s bucket -> the lock-screen seek bar jumped
+   if (k === lastNat && !force) return; lastNat = k;
+-  const x = t ? JSON.stringify({ thumb: noMt(art(t)), thumb2: noMt(artHi(t)), pos: Math.round((au.currentTime || 0) * 1000), dur: (isFinite(au.duration) && au.duration > 0) ? Math.round(au.duration * 1000) : (t.duration || 0), liked, shuf: !!S.shuf, speed: (typeof spd === 'function' ? spd() : 1) }) : '';
++  const x = t ? JSON.stringify({ thumb: withMt(art(t)), thumb2: withMt(artHi(t)), art: (ART.key === artKey(t) && ART.sent !== ART.key ? (ART.sent = ART.key, ART.data) : ''), pos: Math.round((au.currentTime || 0) * 1000), dur: (isFinite(au.duration) && au.duration > 0) ? Math.round(au.duration * 1000) : (t.duration || 0), liked, shuf: !!S.shuf, speed: (typeof spd === 'function' ? spd() : 1) }) : '';
+   try { bridge.nowPlaying(t ? t.title : '', t ? t.author : '', !!S.playing, x) } catch (e) {}
+ }
+ window.lmCmd = c => {          // lock screen + notification buttons (the Android MediaSession sends these)
