@@ -147,7 +147,11 @@ public final class MainActivity extends AppCompatActivity {
             } catch (Exception e) { Log.w(TAG, "notification permission", e); }
         }
 
-        handleIntent(getIntent());
+        /* v23.8-fix6: the "play" request of the card / chip is honoured ONLY on a really fresh start (no saved state)
+           and never when Android re-opens the task from Recents / re-creates the Activity. The system keeps a copy
+           of the intent that was set by onNewIntent() (it still carries lm_play), so every re-creation used to
+           replay it = the song started by itself whenever the user came back into the app. */
+        handleIntent(getIntent(), savedInstanceState == null);
     }
 
     /** Builds a brand-new WebView and stores it in the static holder. */
@@ -215,8 +219,9 @@ public final class MainActivity extends AppCompatActivity {
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
-        setIntent(intent);
-        handleIntent(intent);
+        handleIntent(intent, true);
+        /* the stored intent must not keep the play request for a later re-creation */
+        try { Intent clean = new Intent(intent); clean.removeExtra(PlaybackService.EXTRA_PLAY); setIntent(clean); } catch (Exception e) { setIntent(intent); }
     }
 
     @Override
@@ -308,15 +313,16 @@ public final class MainActivity extends AppCompatActivity {
 
     /* ─────────────── deep link / token ─────────────── */
 
-    private void handleIntent(Intent i) {
+    private void handleIntent(Intent i, boolean allowPlay) {
         if (i == null) return;
         /* v23.8-fix4: "play the song" request from the status-bar chip / the media card. It is
            handled before the auth deep link because the chip intent has no data URI at all. */
         try {
             if (i.getBooleanExtra(PlaybackService.EXTRA_PLAY, false)) {
                 i.removeExtra(PlaybackService.EXTRA_PLAY);
-                sPlayReq = true;
-                deliverPlay();
+                boolean fromHistory = (i.getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0;
+                if (allowPlay && !fromHistory) { sPlayReq = true; deliverPlay(); }
+                else Log.i(TAG, "play request ignored (re-created / from Recents)");
             }
         } catch (Exception e) { Log.w(TAG, "play extra", e); }
         Uri data = i.getData();
